@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="PDW Monitor">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <title>PDW Monitor</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <!-- Login screen -->
+  <div id="login-screen" class="screen active">
+    <div class="login-container">
+      <div class="login-logo">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+          <path d="M2 17l10 5 10-5"/>
+          <path d="M2 12l10 5 10-5"/>
+        </svg>
+        <h1>PDW Monitor</h1>
+        <p>Pager Monitoring System</p>
+      </div>
+      <form id="login-form" autocomplete="on">
+        <div class="form-group">
+          <label for="login-username">Username</label>
+          <input type="text" id="login-username" name="username" autocomplete="username" required>
+        </div>
+        <div class="form-group">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" name="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-full">Sign In</button>
+        <div id="login-error" class="error-msg hidden"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="app-screen" class="screen">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="nav-toggle" class="btn-icon" aria-label="Menu">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+        </button>
+        <h1 class="topbar-title">PDW Monitor</h1>
+      </div>
+      <div class="topbar-right">
+        <div id="connection-status" class="status-dot disconnected" title="Disconnected"></div>
+        <button id="btn-notifications" class="btn-icon" aria-label="Notifications" title="Enable notifications">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+          </svg>
+        </button>
+        <button id="btn-user-menu" class="btn-icon" aria-label="User menu">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- User dropdown menu -->
+    <div id="user-menu" class="dropdown-menu hidden">
+      <div id="user-info" class="dropdown-header"></div>
+      <a href="#" id="menu-change-pw">Change Password</a>
+      <a href="#" id="menu-admin" class="admin-only hidden">Admin Panel</a>
+      <a href="#" id="menu-logout">Sign Out</a>
+    </div>
+
+    <!-- Sidebar / navigation -->
+    <nav id="sidebar" class="sidebar">
+      <div class="sidebar-section">
+        <h3>Views</h3>
+        <a href="#" class="nav-item active" data-view="live">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+          Live Feed
+        </a>
+        <a href="#" class="nav-item" data-view="search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Search
+        </a>
+        <a href="#" class="nav-item" data-view="stats">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          Stats
+        </a>
+      </div>
+      <div class="sidebar-section">
+        <h3>Favourites</h3>
+        <div id="sidebar-favourites" class="nav-list"></div>
+      </div>
+      <div class="sidebar-section">
+        <h3>Groups</h3>
+        <div id="sidebar-groups" class="nav-list"></div>
+      </div>
+      <div class="sidebar-section">
+        <h3>Saved Filters</h3>
+        <div id="sidebar-filters" class="nav-list"></div>
+      </div>
+    </nav>
+
+    <!-- Sidebar overlay for mobile -->
+    <div id="sidebar-overlay" class="sidebar-overlay"></div>
+
+    <!-- Main content area -->
+    <main class="main-content">
+      <!-- Filter bar -->
+      <div id="filter-bar" class="filter-bar">
+        <div class="filter-row">
+          <input type="text" id="filter-search" placeholder="Search messages..." class="filter-input">
+          <select id="filter-call-type" class="filter-select">
+            <option value="">All Types</option>
+          </select>
+          <input type="text" id="filter-capcode" placeholder="Capcode" class="filter-input filter-sm">
+          <input type="text" id="filter-location" placeholder="Location" class="filter-input filter-sm">
+          <input type="text" id="filter-trucks" placeholder="Trucks" class="filter-input filter-sm">
+          <select id="filter-group" class="filter-select">
+            <option value="">All Groups</option>
+          </select>
+          <button id="btn-clear-filters" class="btn btn-sm">Clear</button>
+          <button id="btn-save-filter" class="btn btn-sm btn-secondary">Save Filter</button>
+        </div>
+      </div>
+
+      <!-- Live feed view -->
+      <div id="view-live" class="view active">
+        <div class="view-header">
+          <h2>Live Feed</h2>
+          <div class="view-actions">
+            <label class="toggle-label">
+              <input type="checkbox" id="toggle-autoscroll" checked>
+              Auto-scroll
+            </label>
+            <button id="btn-pause" class="btn btn-sm">Pause</button>
+          </div>
+        </div>
+        <div id="message-list" class="message-list"></div>
+      </div>
+
+      <!-- Search view -->
+      <div id="view-search" class="view">
+        <div class="view-header">
+          <h2>Search Messages</h2>
+        </div>
+        <div id="search-results" class="message-list"></div>
+        <div id="search-pagination" class="pagination"></div>
+      </div>
+
+      <!-- Stats view -->
+      <div id="view-stats" class="view">
+        <div class="view-header">
+          <h2>Statistics (24h)</h2>
+          <button id="btn-refresh-stats" class="btn btn-sm">Refresh</button>
+        </div>
+        <div id="stats-content" class="stats-grid"></div>
+      </div>
+
+      <!-- Admin view -->
+      <div id="view-admin" class="view">
+        <div class="view-header">
+          <h2>Admin Panel</h2>
+        </div>
+        <div class="admin-tabs">
+          <button class="admin-tab active" data-tab="groups">Groups</button>
+          <button class="admin-tab" data-tab="aliases">Capcode Aliases</button>
+          <button class="admin-tab" data-tab="users">Users</button>
+        </div>
+        <div id="admin-content" class="admin-content"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Modal overlay -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div id="modal" class="modal">
+      <div class="modal-header">
+        <h3 id="modal-title"></h3>
+        <button id="modal-close" class="btn-icon">&times;</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+      <div id="modal-footer" class="modal-footer"></div>
+    </div>
+  </div>
+
+  <!-- Message detail panel (slide-up on mobile) -->
+  <div id="detail-panel" class="detail-panel hidden">
+    <div class="detail-header">
+      <h3>Message Detail</h3>
+      <button id="detail-close" class="btn-icon">&times;</button>
+    </div>
+    <div id="detail-content" class="detail-content"></div>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

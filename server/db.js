@@ -1,0 +1,112 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+const fs = require('fs');
+const config = require('./config');
+
+// Ensure data directory exists
+const dataDir = path.dirname(config.DB_PATH);
+if (!fs.existsSync(dataDir)) {
+  fs.mkdirSync(dataDir, { recursive: true });
+}
+
+const db = new Database(config.DB_PATH);
+
+// Enable WAL mode for better concurrent read performance
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+// Create tables
+db.exec(`
+  -- Users table
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user' CHECK(role IN ('admin', 'user')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Messages table
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capcode TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    protocol TEXT NOT NULL DEFAULT 'POCSAG',
+    bitrate INTEGER,
+    function_code INTEGER,
+    source TEXT DEFAULT 'unknown',
+    call_type TEXT,
+    location TEXT,
+    trucks TEXT,
+    is_multipart INTEGER NOT NULL DEFAULT 0,
+    multipart_id TEXT,
+    raw TEXT,
+    hash TEXT,
+    received_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_messages_capcode ON messages(capcode);
+  CREATE INDEX IF NOT EXISTS idx_messages_received_at ON messages(received_at);
+  CREATE INDEX IF NOT EXISTS idx_messages_call_type ON messages(call_type);
+  CREATE INDEX IF NOT EXISTS idx_messages_location ON messages(location);
+  CREATE INDEX IF NOT EXISTS idx_messages_hash ON messages(hash);
+
+  -- Capcode aliases (friendly names for capcodes)
+  CREATE TABLE IF NOT EXISTS capcode_aliases (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    capcode TEXT UNIQUE NOT NULL,
+    alias TEXT NOT NULL,
+    colour TEXT DEFAULT '#6b7280',
+    icon TEXT DEFAULT 'radio',
+    call_type TEXT,
+    location TEXT
+  );
+
+  -- Groups (regions / categories)
+  CREATE TABLE IF NOT EXISTS groups_ (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT UNIQUE NOT NULL,
+    description TEXT DEFAULT '',
+    colour TEXT DEFAULT '#3b82f6',
+    created_by INTEGER REFERENCES users(id),
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Group members (capcodes belonging to a group)
+  CREATE TABLE IF NOT EXISTS group_members (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL REFERENCES groups_(id) ON DELETE CASCADE,
+    capcode TEXT NOT NULL,
+    UNIQUE(group_id, capcode)
+  );
+  CREATE INDEX IF NOT EXISTS idx_group_members_capcode ON group_members(capcode);
+
+  -- User favourites (groups a user has favourited)
+  CREATE TABLE IF NOT EXISTS user_favourites (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    group_id INTEGER NOT NULL REFERENCES groups_(id) ON DELETE CASCADE,
+    notify INTEGER NOT NULL DEFAULT 1,
+    UNIQUE(user_id, group_id)
+  );
+
+  -- User filters (saved filter presets)
+  CREATE TABLE IF NOT EXISTS user_filters (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    filter_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
+  -- Push subscriptions
+  CREATE TABLE IF NOT EXISTS push_subscriptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint TEXT UNIQUE NOT NULL,
+    keys_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
+module.exports = db;
