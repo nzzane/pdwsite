@@ -48,7 +48,9 @@ app.use('/manifest.json', (req, res, next) => {
 });
 
 // Static files (PWA frontend)
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// maxAge 0 forces browsers to revalidate via ETag/If-None-Match on every request,
+// preventing stale cached JS/CSS after Docker rebuilds
+app.use(express.static(path.join(__dirname, '..', 'public'), { maxAge: 0 }));
 
 // API routes
 app.use(router);
