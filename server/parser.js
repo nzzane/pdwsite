@@ -11,7 +11,7 @@ const CALL_TYPE_PATTERNS = [
   { pattern: /\bRUBBISH\s*FIRE\b/i, type: 'RUBBISH FIRE', colour: '#f59e0b' },
   { pattern: /\bVEHICLE\s*FIRE\b/i, type: 'VEHICLE FIRE', colour: '#dc2626' },
   { pattern: /\bCHIMNEY\s*FIRE\b/i, type: 'CHIMNEY FIRE', colour: '#ea580c' },
-  { pattern: /\bMVC\b|\bMVA\b|\bCRASH\b/i, type: 'MVC', colour: '#7c3aed' },
+  { pattern: /\bMVC\b|\bMVA\b|\bMVCRESC\b|\bCRASH\b/i, type: 'MVC', colour: '#7c3aed' },
   { pattern: /\bMIN\b/i, type: 'MIN', colour: '#2563eb' },
   { pattern: /\bRESCUE\b/i, type: 'RESCUE', colour: '#0891b2' },
   { pattern: /\bHAZMAT\b|\bHAZ\s*MAT\b/i, type: 'HAZMAT', colour: '#ca8a04' },
@@ -19,9 +19,10 @@ const CALL_TYPE_PATTERNS = [
   { pattern: /\bCARDIAC\b/i, type: 'CARDIAC', colour: '#dc2626' },
   { pattern: /\bBREATHING\b/i, type: 'BREATHING', colour: '#16a34a' },
   { pattern: /\bTRAUMA\b/i, type: 'TRAUMA', colour: '#9333ea' },
-  { pattern: /\bALARM\s*(?:ACTIVATION|ACT)\b/i, type: 'ALARM', colour: '#64748b' },
+  { pattern: /\bALARM\s*(?:ACTIVATION|ACT)\b|\bSPRNKLR\b|\bSPRINKLER\b/i, type: 'ALARM', colour: '#64748b' },
   { pattern: /\bSPECIAL\s*SERVICE\b/i, type: 'SPECIAL SERVICE', colour: '#0284c7' },
   { pattern: /\bASSIST\b/i, type: 'ASSIST', colour: '#6366f1' },
+  { pattern: /\bNAT\s*\d?\b/i, type: 'SPECIAL SERVICE', colour: '#0284c7' },
   { pattern: /\bTEST\s*(?:PAGE|MSG|CALL)?\b/i, type: 'TEST', colour: '#9ca3af' },
   { pattern: /\bPROW?LER\b/i, type: 'PROWLER', colour: '#475569' },
   { pattern: /\bFLOOD(?:ING)?\b/i, type: 'FLOODING', colour: '#0ea5e9' },
@@ -258,12 +259,20 @@ function handleMultipart(capcode, content, onComplete) {
  * Formats:
  *   POCSAG512:  Address: 1234567  Function: 0  Alpha:   Some message
  *   POCSAG1200: Address: 1234567  Function: 2  Alpha:   Some message
- *   FLEX: ...
- *   FLEX|xxxx/xx/xx xx:xx:xx|1600|ALN|x.x.x|xxxxxxx|Some message
+ *   FLEX|timestamp|1600/2/K/A|frame|capcode|ALN|Message text  (7-field pipe)
+ *   FLEX: timestamp 1600/2/K/A frame [capcode] ALN Message    (bracket style)
+ *   FLEX|timestamp|1600|ALN|frame|capcode|Message text         (6-field pipe)
  */
 function parseMultimonLine(line) {
   if (!line || typeof line !== 'string') return null;
   line = line.trim();
+
+  // Strip syslog/timestamp prefix if present
+  // e.g., "Dec 31 23:47:50 host ... [quality...] FLEX|..."
+  const protoMatch = line.match(/(FLEX[|:]|POCSAG\d*:)/i);
+  if (protoMatch && protoMatch.index > 0) {
+    line = line.substring(protoMatch.index);
+  }
 
   // POCSAG format
   const pocsagMatch = line.match(
@@ -280,7 +289,25 @@ function parseMultimonLine(line) {
     };
   }
 
-  // FLEX format: bracket style (most common multimon-ng FLEX output)
+  // FLEX format: 7-field pipe-delimited (standard multimon-ng FLEX output)
+  // FLEX|2026-02-17 17:52:07|1600/2/K/A|13.013|001234567|ALN|Message text
+  const flex7 = line.match(
+    /^FLEX\|([^|]+)\|(\d+)\/[^|]*\|[^|]+\|(\d+)\|(\w+)\|(.*)/i
+  );
+  if (flex7) {
+    const content = cleanContent(flex7[5]);
+    if (!content) return null;
+    return {
+      protocol: 'FLEX',
+      bitrate: parseInt(flex7[2], 10),
+      capcode: flex7[3].replace(/^0+(\d)/, '$1'),
+      function_code: 0,
+      content,
+      raw: line,
+    };
+  }
+
+  // FLEX format: bracket style
   // FLEX: 2025-02-17 12:34:56 1600/2/K/A 07.041 [0001234567] ALN Message text
   const flexBracket = line.match(
     /^FLEX[:|]\s*(?:[\d-]+\s+[\d:]+\s+)?(\d+)\/\d+\/\w\/.\s+[\d.]+\s+\[(\d+)\]\s+(\w{3})\s+(.*)/i
@@ -291,25 +318,25 @@ function parseMultimonLine(line) {
     return {
       protocol: 'FLEX',
       bitrate: parseInt(flexBracket[1], 10),
-      capcode: flexBracket[2].replace(/^0+(\d)/, '$1'), // Strip leading zeros
+      capcode: flexBracket[2].replace(/^0+(\d)/, '$1'),
       function_code: 0,
       content,
       raw: line,
     };
   }
 
-  // FLEX format (pipe-delimited)
+  // FLEX format: 6-field pipe-delimited (alternative tools)
   // FLEX|timestamp|1600|ALN|07.041|1234567|Message text
-  const flexMatch = line.match(
-    /^FLEX[:|]\s*(.+?)\|(\d+)\|(\w+)\|([^|]+)\|(\d+)\|(.*)/i
+  const flex6 = line.match(
+    /^FLEX[:|]\s*([^|]+)\|(\d+)\|(\w+)\|([^|]+)\|(\d+)\|(.*)/i
   );
-  if (flexMatch) {
-    const content = cleanContent(flexMatch[6]);
+  if (flex6) {
+    const content = cleanContent(flex6[6]);
     if (!content) return null;
     return {
       protocol: 'FLEX',
-      bitrate: parseInt(flexMatch[2], 10),
-      capcode: flexMatch[5],
+      bitrate: parseInt(flex6[2], 10),
+      capcode: flex6[5].replace(/^0+(\d)/, '$1'),
       function_code: 0,
       content,
       raw: line,
@@ -317,14 +344,14 @@ function parseMultimonLine(line) {
   }
 
   // FLEX simpler fallback
-  const flexSimple = line.match(/^FLEX:\s*.*?\|.*?\|(\d+)\|(.*)/i);
+  const flexSimple = line.match(/^FLEX[:|]\s*.*?\|.*?\|(\d+)\|(.*)/i);
   if (flexSimple) {
     const content = cleanContent(flexSimple[2]);
     if (!content) return null;
     return {
       protocol: 'FLEX',
       bitrate: null,
-      capcode: flexSimple[1],
+      capcode: flexSimple[1].replace(/^0+(\d)/, '$1'),
       function_code: 0,
       content,
       raw: line,

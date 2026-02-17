@@ -50,7 +50,12 @@ const CONFIG = {
   READ_STDIN: process.env.READ_STDIN === '1' || process.env.READ_STDIN === 'true',
 
   // Capcodes to exclude from sending (comma-separated, e.g. test pagers)
-  EXCLUDE_CAPCODES: new Set((process.env.EXCLUDE_CAPCODES || '1234567').split(',').map(s => s.trim()).filter(Boolean)),
+  EXCLUDE_CAPCODES: new Set(
+    (process.env.EXCLUDE_CAPCODES || '1234567')
+      .split(',')
+      .map(s => s.trim().replace(/^0+(\d)/, '$1'))
+      .filter(Boolean)
+  ),
 };
 
 // ─── Content cleaning ───
@@ -154,6 +159,13 @@ function parseLine(line) {
   line = line.trim();
   if (!line) return null;
 
+  // Strip syslog/timestamp prefix if present
+  // e.g., "Dec 31 23:47:50 host ... [quality...] FLEX|..."
+  const protoMatch = line.match(/(FLEX[|:]|POCSAG\d*:)/i);
+  if (protoMatch && protoMatch.index > 0) {
+    line = line.substring(protoMatch.index);
+  }
+
   // POCSAG format
   // POCSAG512: Address: 1125635 Function: 3 Alpha: MATAFRU RED 1 ...
   const pocsagMatch = line.match(
@@ -172,7 +184,25 @@ function parseLine(line) {
     };
   }
 
-  // FLEX format: bracket style (most common multimon-ng FLEX output)
+  // FLEX format: 7-field pipe-delimited (standard multimon-ng FLEX output)
+  // FLEX|2026-02-17 17:52:07|1600/2/K/A|13.013|001234567|ALN|Message text
+  const flex7 = line.match(
+    /^FLEX\|([^|]+)\|(\d+)\/[^|]*\|[^|]+\|(\d+)\|(\w+)\|(.*)/i
+  );
+  if (flex7) {
+    const content = cleanContent(flex7[5]);
+    if (!content) return null;
+    return {
+      protocol: 'FLEX',
+      bitrate: parseInt(flex7[2], 10),
+      capcode: flex7[3].replace(/^0+(\d)/, '$1'),
+      function_code: 0,
+      content,
+      raw: line,
+    };
+  }
+
+  // FLEX format: bracket style
   // FLEX: 2025-02-17 12:34:56 1600/2/K/A 07.041 [0001234567] ALN Message text
   const flexBracket = line.match(
     /^FLEX[:|]\s*(?:[\d-]+\s+[\d:]+\s+)?(\d+)\/\d+\/\w\/.\s+[\d.]+\s+\[(\d+)\]\s+(\w{3})\s+(.*)/i
@@ -183,25 +213,25 @@ function parseLine(line) {
     return {
       protocol: 'FLEX',
       bitrate: parseInt(flexBracket[1], 10),
-      capcode: flexBracket[2].replace(/^0+(\d)/, '$1'), // Strip leading zeros
+      capcode: flexBracket[2].replace(/^0+(\d)/, '$1'),
       function_code: 0,
       content,
       raw: line,
     };
   }
 
-  // FLEX format (pipe-delimited)
+  // FLEX format: 6-field pipe-delimited (alternative tools)
   // FLEX|timestamp|1600|ALN|07.041|1234567|Message text
-  const flexMatch = line.match(
-    /^FLEX[:|]\s*(.+?)\|(\d+)\|(\w+)\|([^|]+)\|(\d+)\|(.*)/i
+  const flex6 = line.match(
+    /^FLEX[:|]\s*([^|]+)\|(\d+)\|(\w+)\|([^|]+)\|(\d+)\|(.*)/i
   );
-  if (flexMatch) {
-    const content = cleanContent(flexMatch[6]);
+  if (flex6) {
+    const content = cleanContent(flex6[6]);
     if (!content) return null;
     return {
       protocol: 'FLEX',
-      bitrate: parseInt(flexMatch[2], 10),
-      capcode: flexMatch[5],
+      bitrate: parseInt(flex6[2], 10),
+      capcode: flex6[5].replace(/^0+(\d)/, '$1'),
       function_code: 0,
       content,
       raw: line,
@@ -209,14 +239,14 @@ function parseLine(line) {
   }
 
   // FLEX simpler fallback
-  const flexSimple = line.match(/^FLEX:\s*.*?\|.*?\|(\d+)\|(.*)/i);
+  const flexSimple = line.match(/^FLEX[:|]\s*.*?\|.*?\|(\d+)\|(.*)/i);
   if (flexSimple) {
     const content = cleanContent(flexSimple[2]);
     if (!content) return null;
     return {
       protocol: 'FLEX',
       bitrate: null,
-      capcode: flexSimple[1],
+      capcode: flexSimple[1].replace(/^0+(\d)/, '$1'),
       function_code: 0,
       content,
       raw: line,
