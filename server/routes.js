@@ -422,6 +422,9 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
     for (const msg of messages) {
       if (!msg.capcode) continue;
 
+      // Clean control character tags from content
+      msg.content = parser.cleanContent(msg.content);
+
       // Enrich
       const callType = msg.call_type || parser.detectCallType(msg.content);
       const location = msg.location || parser.extractLocation(msg.content);

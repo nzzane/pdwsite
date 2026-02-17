@@ -48,6 +48,19 @@ const LOCATION_PATTERNS = [
 const INCIDENT_PATTERN = /#?(F\d{6,})\b/;
 
 /**
+ * Clean control character tags from multimon-ng output.
+ * Strips <ETX>, <EOT>, <STX>, <NUL>, etc. and fixes character mappings.
+ */
+function cleanContent(content) {
+  if (!content) return '';
+  return content
+    .replace(/<[A-Za-z]{2,4}>/g, '')  // Strip <ETX>, <EOT>, <STX>, <NUL>, etc.
+    .replace(/Ä/g, '[')               // Multimon-ng maps [ to Ä
+    .replace(/Ü/g, ']')               // Multimon-ng maps ] to Ü
+    .trim();
+}
+
+/**
  * Detect call type from message content.
  */
 function detectCallType(content) {
@@ -240,35 +253,58 @@ function parseMultimonLine(line) {
       bitrate: parseInt(pocsagMatch[2], 10),
       capcode: pocsagMatch[3],
       function_code: parseInt(pocsagMatch[4], 10),
-      content: pocsagMatch[5].trim(),
+      content: cleanContent(pocsagMatch[5]),
+      raw: line,
+    };
+  }
+
+  // FLEX format: bracket style (most common multimon-ng FLEX output)
+  // FLEX: 2025-02-17 12:34:56 1600/2/K/A 07.041 [0001234567] ALN Message text
+  const flexBracket = line.match(
+    /^FLEX[:|]\s*(?:[\d-]+\s+[\d:]+\s+)?(\d+)\/\d+\/\w\/.\s+[\d.]+\s+\[(\d+)\]\s+(\w{3})\s+(.*)/i
+  );
+  if (flexBracket) {
+    const content = cleanContent(flexBracket[4]);
+    if (!content) return null;
+    return {
+      protocol: 'FLEX',
+      bitrate: parseInt(flexBracket[1], 10),
+      capcode: flexBracket[2].replace(/^0+(\d)/, '$1'), // Strip leading zeros
+      function_code: 0,
+      content,
       raw: line,
     };
   }
 
   // FLEX format (pipe-delimited)
+  // FLEX|timestamp|1600|ALN|07.041|1234567|Message text
   const flexMatch = line.match(
     /^FLEX[:|]\s*(.+?)\|(\d+)\|(\w+)\|([^|]+)\|(\d+)\|(.*)/i
   );
   if (flexMatch) {
+    const content = cleanContent(flexMatch[6]);
+    if (!content) return null;
     return {
       protocol: 'FLEX',
       bitrate: parseInt(flexMatch[2], 10),
       capcode: flexMatch[5],
       function_code: 0,
-      content: flexMatch[6].trim(),
+      content,
       raw: line,
     };
   }
 
-  // FLEX simpler format
+  // FLEX simpler fallback
   const flexSimple = line.match(/^FLEX:\s*.*?\|.*?\|(\d+)\|(.*)/i);
   if (flexSimple) {
+    const content = cleanContent(flexSimple[2]);
+    if (!content) return null;
     return {
       protocol: 'FLEX',
       bitrate: null,
       capcode: flexSimple[1],
       function_code: 0,
-      content: flexSimple[2].trim(),
+      content,
       raw: line,
     };
   }
@@ -281,18 +317,22 @@ function parseMultimonLine(line) {
  */
 function enrichMessage(parsed) {
   if (!parsed) return null;
+  // Clean control chars from content before enriching
+  const content = cleanContent(parsed.content);
   return {
     ...parsed,
-    call_type: detectCallType(parsed.content),
-    location: extractLocation(parsed.content),
-    trucks: extractTrucks(parsed.content),
-    incident_number: extractIncidentNumber(parsed.content),
-    hash: dedupeHash(parsed.capcode, parsed.content),
+    content,
+    call_type: detectCallType(content),
+    location: extractLocation(content),
+    trucks: extractTrucks(content),
+    incident_number: extractIncidentNumber(content),
+    hash: dedupeHash(parsed.capcode, content),
   };
 }
 
 module.exports = {
   CALL_TYPE_PATTERNS,
+  cleanContent,
   detectCallType,
   getCallTypeColour,
   extractLocation,

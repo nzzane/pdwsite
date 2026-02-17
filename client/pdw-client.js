@@ -48,7 +48,21 @@ const CONFIG = {
 
   // If true, read from stdin instead of spawning rtl_fm (for testing / piping)
   READ_STDIN: process.env.READ_STDIN === '1' || process.env.READ_STDIN === 'true',
+
+  // Capcodes to exclude from sending (comma-separated, e.g. test pagers)
+  EXCLUDE_CAPCODES: new Set((process.env.EXCLUDE_CAPCODES || '1234567').split(',').map(s => s.trim()).filter(Boolean)),
 };
+
+// ─── Content cleaning ───
+// Strips multimon-ng control character tags and fixes character mappings
+function cleanContent(content) {
+  if (!content) return '';
+  return content
+    .replace(/<[A-Za-z]{2,4}>/g, '')  // Strip <ETX>, <EOT>, <STX>, <NUL>, etc.
+    .replace(/Ä/g, '[')               // Multimon-ng maps [ to Ä
+    .replace(/Ü/g, ']')               // Multimon-ng maps ] to Ü
+    .trim();
+}
 
 // ─── Dedup tracking ───
 const recentHashes = new Map();
@@ -141,12 +155,13 @@ function parseLine(line) {
   if (!line) return null;
 
   // POCSAG format
+  // POCSAG512: Address: 1125635 Function: 3 Alpha: MATAFRU RED 1 ...
   const pocsagMatch = line.match(
     /^(POCSAG)(\d+):\s*Address:\s*(\d+)\s*Function:\s*(\d+)\s*(?:Alpha|Numeric|Tone):\s*(.*)/i
   );
   if (pocsagMatch) {
-    const content = pocsagMatch[5].trim();
-    if (!content) return null; // Skip empty messages
+    const content = cleanContent(pocsagMatch[5]);
+    if (!content) return null;
     return {
       protocol: 'POCSAG',
       bitrate: parseInt(pocsagMatch[2], 10),
@@ -157,12 +172,31 @@ function parseLine(line) {
     };
   }
 
+  // FLEX format: bracket style (most common multimon-ng FLEX output)
+  // FLEX: 2025-02-17 12:34:56 1600/2/K/A 07.041 [0001234567] ALN Message text
+  const flexBracket = line.match(
+    /^FLEX[:|]\s*(?:[\d-]+\s+[\d:]+\s+)?(\d+)\/\d+\/\w\/.\s+[\d.]+\s+\[(\d+)\]\s+(\w{3})\s+(.*)/i
+  );
+  if (flexBracket) {
+    const content = cleanContent(flexBracket[4]);
+    if (!content) return null;
+    return {
+      protocol: 'FLEX',
+      bitrate: parseInt(flexBracket[1], 10),
+      capcode: flexBracket[2].replace(/^0+(\d)/, '$1'), // Strip leading zeros
+      function_code: 0,
+      content,
+      raw: line,
+    };
+  }
+
   // FLEX format (pipe-delimited)
+  // FLEX|timestamp|1600|ALN|07.041|1234567|Message text
   const flexMatch = line.match(
     /^FLEX[:|]\s*(.+?)\|(\d+)\|(\w+)\|([^|]+)\|(\d+)\|(.*)/i
   );
   if (flexMatch) {
-    const content = flexMatch[6].trim();
+    const content = cleanContent(flexMatch[6]);
     if (!content) return null;
     return {
       protocol: 'FLEX',
@@ -174,10 +208,10 @@ function parseLine(line) {
     };
   }
 
-  // FLEX simpler format
+  // FLEX simpler fallback
   const flexSimple = line.match(/^FLEX:\s*.*?\|.*?\|(\d+)\|(.*)/i);
   if (flexSimple) {
-    const content = flexSimple[2].trim();
+    const content = cleanContent(flexSimple[2]);
     if (!content) return null;
     return {
       protocol: 'FLEX',
@@ -233,17 +267,28 @@ function sendToServer(messages) {
     let data = '';
     res.on('data', chunk => data += chunk);
     res.on('end', () => {
+      const ts = new Date().toLocaleTimeString();
       if (res.statusCode === 200) {
-        const result = JSON.parse(data);
-        console.log(`[SENT] ${messages.length} messages, ${result.inserted} inserted`);
+        try {
+          const result = JSON.parse(data);
+          stats.sent += result.inserted;
+          const capcodes = messages.map(m => m.capcode).join(', ');
+          console.log(`[SENT] ${ts} ${messages.length} msg(s), ${result.inserted} inserted [${capcodes}]`);
+          console.log(`[STATS] Total: recv=${stats.received} sent=${stats.sent} dedup=${stats.deduped} skip=${stats.excluded} err=${stats.errors}`);
+        } catch (e) {
+          console.log(`[SENT] ${ts} ${messages.length} msg(s) - response: ${data}`);
+        }
       } else {
-        console.error(`[ERROR] Server returned ${res.statusCode}: ${data}`);
+        stats.errors++;
+        console.error(`[ERROR] ${ts} Server returned ${res.statusCode}: ${data}`);
       }
     });
   });
 
   req.on('error', (err) => {
-    console.error(`[ERROR] Failed to send: ${err.message}`);
+    stats.errors++;
+    const ts = new Date().toLocaleTimeString();
+    console.error(`[ERROR] ${ts} Failed to send: ${err.message}`);
     // Re-queue on failure
     messageQueue.unshift(...messages);
   });
@@ -252,12 +297,30 @@ function sendToServer(messages) {
   req.end();
 }
 
+// ─── Statistics ───
+let stats = { received: 0, sent: 0, deduped: 0, excluded: 0, errors: 0 };
+
 // ─── Process a decoded line ───
 async function processLine(line) {
   const parsed = parseLine(line);
-  if (!parsed) return;
+  if (!parsed) {
+    // Log unparsed lines that look like they might be pages (debug)
+    if (line && line.trim() && (line.includes('FLEX') || line.includes('POCSAG'))) {
+      console.log(`[PARSE] Could not parse: ${line.trim().substring(0, 120)}`);
+    }
+    return;
+  }
 
-  console.log(`[RECV] ${parsed.protocol}${parsed.bitrate || ''} Cap:${parsed.capcode} ${parsed.content.substring(0, 80)}`);
+  stats.received++;
+  const ts = new Date().toLocaleTimeString();
+  console.log(`[RECV] ${ts} ${parsed.protocol}/${parsed.bitrate || '?'} Cap:${parsed.capcode} ${parsed.content.substring(0, 100)}`);
+
+  // Exclude test capcodes (still log them, just don't send)
+  if (CONFIG.EXCLUDE_CAPCODES.has(parsed.capcode)) {
+    stats.excluded++;
+    console.log(`[SKIP] Test capcode ${parsed.capcode} excluded`);
+    return;
+  }
 
   // Handle multipart
   const result = handleMultipart(parsed.capcode, parsed.content);
@@ -277,7 +340,8 @@ async function processLine(line) {
   // Dedup
   const hash = dedupeHash(parsed.capcode, parsed.content);
   if (isDuplicate(hash)) {
-    console.log(`[DEDUP] Skipping duplicate: ${parsed.capcode}`);
+    stats.deduped++;
+    console.log(`[DEDUP] Skipping duplicate: Cap:${parsed.capcode}`);
     return;
   }
 
@@ -290,6 +354,9 @@ function start() {
   console.log('=== PDW Client ===');
   console.log(`Server: ${CONFIG.SERVER_URL}`);
   console.log(`Decoders: ${CONFIG.DECODERS.join(', ')}`);
+  if (CONFIG.EXCLUDE_CAPCODES.size > 0) {
+    console.log(`Excluded capcodes: ${[...CONFIG.EXCLUDE_CAPCODES].join(', ')}`);
+  }
 
   if (!CONFIG.API_KEY) {
     console.error('ERROR: API_KEY is not set.');
