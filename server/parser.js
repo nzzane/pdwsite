@@ -5,31 +5,59 @@ const config = require('./config');
  * NZ Fire/Ambulance pager call type detection patterns.
  * Maps keywords/patterns found in pager messages to call types.
  */
+// ── FENZ fire type codes (appear at start of FLEX dispatch messages) ──
+const FENZ_TYPE_CODES = new Set([
+  'ADV', 'EXERCISE', 'FIREALM', 'FIRETEST', 'HAZ', 'HAZGAS',
+  'MED', 'MEDFR', 'MIN', 'NAT1', 'NAT2', 'NAT3', 'STRU',
+  'MVC', 'STNCALL', 'MVCHEVY', 'MVCRESC', 'RESC', 'SHIP',
+  'SPRNKLR', 'VEG', 'TRA', 'USAR', 'WATRESC',
+]);
+
+// ── Known NZ ambulance AMPDS call type descriptions ──
+// Ordered longest-first so "SERIOUS HAEMORRHAGE" matches before "HAEMORRHAGE"
+const AMBO_CALL_TYPES = [
+  'ABNORMAL BREATHING', 'ACUTE ADMISSION', 'DIFFICULTY BREATHING',
+  'INEFFECTIVE BREATHING', 'RESPIRATORY ARREST', 'SERIOUS HAEMORRHAGE',
+  'CARDIAC PROBLEM', 'COMMUNITY ALARM', 'DIZZINESS/VERTIGO',
+  'HEART PROBLEM', 'HEAT EXPOSURE', 'IMPENDING FIT',
+  'INTENDING SUICIDE', 'NEAR DROWNING', 'SUICIDAL IDEATION',
+  'UNKNOWN PROBLEM', 'WEAKNESS/NUMBNESS', 'ABDO PAIN',
+  'ALTERED LOC', 'BACK PAIN', 'BITE/ATTACK', 'CHEST PAIN',
+  'CO/INH/HAZ', 'ELECTROCUTION', 'EYE INJURY', 'FEVER/CHILLS',
+  'HAEMORRHAGE', 'PSYCH/SUICIDE', 'SICK PERSON', 'STAB/GSW',
+  'ACCIDENT', 'ALLERGY', 'ARREST', 'ASSAULT', 'BURNS',
+  'CHOKING', 'DIABETIC', 'DROWNING', 'FAINT', 'FALL',
+  'FITTING', 'HEADACHE', 'MVA', 'NAUSEA', 'OBSTETRIC',
+  'OVERDOSE', 'PAIN', 'PARALYSIS', 'POISONING', 'SEIZURE',
+  'STROKE', 'TRAUMA', 'UNCONSCIOUS', 'VOMITING',
+];
+
 const CALL_TYPE_PATTERNS = [
-  { pattern: /\bSTRUCTURE\s*FIRE\b/i, type: 'STRUCTURE FIRE', colour: '#dc2626' },
-  { pattern: /\bVEGETATION\s*FIRE\b/i, type: 'VEGETATION FIRE', colour: '#ea580c' },
-  { pattern: /\bRUBBISH\s*FIRE\b/i, type: 'RUBBISH FIRE', colour: '#f59e0b' },
-  { pattern: /\bVEHICLE\s*FIRE\b/i, type: 'VEHICLE FIRE', colour: '#dc2626' },
-  { pattern: /\bCHIMNEY\s*FIRE\b/i, type: 'CHIMNEY FIRE', colour: '#ea580c' },
-  { pattern: /\bMVC\b|\bMVA\b|\bMVCRESC\b|\bCRASH\b/i, type: 'MVC', colour: '#7c3aed' },
-  { pattern: /\bMIN\b/i, type: 'MIN', colour: '#2563eb' },
-  { pattern: /\bRESCUE\b/i, type: 'RESCUE', colour: '#0891b2' },
-  { pattern: /\bHAZMAT\b|\bHAZ\s*MAT\b/i, type: 'HAZMAT', colour: '#ca8a04' },
-  { pattern: /\bMEDICAL\b|\bAMBO\b|\bAMBULANCE\b/i, type: 'AMBO', colour: '#16a34a' },
-  { pattern: /\bCARDIAC\b/i, type: 'CARDIAC', colour: '#dc2626' },
-  { pattern: /\bBREATHING\b/i, type: 'BREATHING', colour: '#16a34a' },
-  { pattern: /\bTRAUMA\b/i, type: 'TRAUMA', colour: '#9333ea' },
-  { pattern: /\bALARM\s*(?:ACTIVATION|ACT)\b|\bSPRNKLR\b|\bSPRINKLER\b/i, type: 'ALARM', colour: '#64748b' },
-  { pattern: /\bSPECIAL\s*SERVICE\b/i, type: 'SPECIAL SERVICE', colour: '#0284c7' },
-  { pattern: /\bASSIST\b/i, type: 'ASSIST', colour: '#6366f1' },
-  { pattern: /\bNAT\s*\d?\b/i, type: 'SPECIAL SERVICE', colour: '#0284c7' },
-  { pattern: /\bTEST\s*(?:PAGE|MSG|CALL)?\b/i, type: 'TEST', colour: '#9ca3af' },
-  { pattern: /\bPROW?LER\b/i, type: 'PROWLER', colour: '#475569' },
-  { pattern: /\bFLOOD(?:ING)?\b/i, type: 'FLOODING', colour: '#0ea5e9' },
-  { pattern: /\bSLIP\b/i, type: 'SLIP', colour: '#78716c' },
-  { pattern: /\bLIFT\s*RESCUE\b/i, type: 'LIFT RESCUE', colour: '#0891b2' },
-  { pattern: /\bWATER\s*RESCUE\b/i, type: 'WATER RESCUE', colour: '#0284c7' },
-  { pattern: /\bRURAL\s*FIRE\b/i, type: 'RURAL FIRE', colour: '#ea580c' },
+  // ── FENZ fire codes (short identifiers in FLEX messages) ──
+  { pattern: /\bFIREALM\b/i, type: 'FIREALM' },
+  { pattern: /\bSTRU\b/i, type: 'STRU' },
+  { pattern: /\bVEG\b/i, type: 'VEG' },
+  { pattern: /\bMVCRESC\b/i, type: 'MVCRESC' },
+  { pattern: /\bMVCHEVY\b/i, type: 'MVCHEVY' },
+  { pattern: /\bMVC\b/i, type: 'MVC' },
+  { pattern: /\bHAZGAS\b/i, type: 'HAZGAS' },
+  { pattern: /\bHAZ\b/i, type: 'HAZ' },
+  { pattern: /\bMEDFR\b/i, type: 'MEDFR' },
+  { pattern: /\bMED\b/i, type: 'MED' },
+  { pattern: /\bMIN\b/i, type: 'MIN' },
+  { pattern: /\bWATRESC\b/i, type: 'WATRESC' },
+  { pattern: /\bRESC\b/i, type: 'RESC' },
+  { pattern: /\bUSAR\b/i, type: 'USAR' },
+  { pattern: /\bSPRNKLR\b/i, type: 'SPRNKLR' },
+  { pattern: /\bNAT[123]\b/i, type: 'NAT1' }, // NAT1/2/3
+  { pattern: /\bSHIP\b/i, type: 'SHIP' },
+  { pattern: /\bSTNCALL\b/i, type: 'STNCALL' },
+  { pattern: /\bADV\b/i, type: 'ADV' },
+  { pattern: /\bTRA\b/i, type: 'TRA' },
+  { pattern: /\bEXERCISE\b/i, type: 'EXERCISE' },
+  { pattern: /\bFIRETEST\b/i, type: 'FIRETEST' },
+  // ── Generic fallbacks (matched after specific codes) ──
+  { pattern: /\bTEST\s*(?:PAGE|MSG|CALL)?\b/i, type: 'TEST' },
 ];
 
 /**
@@ -51,34 +79,120 @@ const INCIDENT_PATTERN = /#?(F\d{6,})\b/;
 /**
  * Clean control character tags from multimon-ng output.
  * Strips <ETX>, <EOT>, <STX>, <NUL>, etc. and fixes character mappings.
+ * Also strips FLEX multipart frame markers: "(Part X of Y)" mid-content,
+ * incomplete "(Part" at end, and orphaned "X)" or "X of Y)" at start.
  */
 function cleanContent(content) {
   if (!content) return '';
-  return content
+  content = content
     .replace(/<[A-Za-z]{2,4}>/g, '')  // Strip <ETX>, <EOT>, <STX>, <NUL>, etc.
     .replace(/Ä/g, '[')               // Multimon-ng maps [ to Ä
-    .replace(/Ü/g, ']')               // Multimon-ng maps ] to Ü
-    .trim();
+    .replace(/Ü/g, ']');              // Multimon-ng maps ] to Ü
+
+  // Strip FLEX multipart frame markers inserted by multimon-ng
+  // Complete markers within content: "(Part 1 of 2)" or "(Part 2)"
+  content = content.replace(/\(Part\s+\d+\s*(?:of\s*\d+\s*)?\)/gi, '');
+  // Incomplete marker at end: "(Part 1 of" or "(Part" (frame got cut off)
+  content = content.replace(/\(Part\s*(?:\d+\s*(?:of\s*\d*\s*)?)?\s*$/gi, '');
+  // Orphaned continuation at start: "2)" or "1 of 2)" from previous frame
+  content = content.replace(/^\s*\d+\s*(?:of\s*\d+\s*)?\)\s*/i, '');
+
+  return content.trim();
+}
+
+/**
+ * Extract NZ ambulance call type from AMPDS dispatch format.
+ * Format: "<UNIT> <COLOR> <LEVEL> <AMPDS_CODE> <CALL_TYPE> [- suffix] ; Flat/Unit: ..."
+ * e.g. "ECHO12 RED 1 13C01 DIABETIC NOT ALERT ; Flat/Unit: /1021 PEAK RD"
+ *      "WEST2 ORANGE 2 RESP5 TIME SENSITIVE - E ; Flat/Unit: /20 BARRYS RD"
+ *      "BKBLFRU GREEN 1 35B01 ACUTE ADMISSION ; Flat/Unit: /7 HILTON ST"
+ */
+function detectAmboCallType(content) {
+  if (!content) return null;
+  // Match priority colour + level + AMPDS code, then extract the call type text
+  const m = content.match(
+    /(?:PURPLE|RED|ORANGE|GREEN)\s+\d+\s+\w+\s+(.+?)(?:\s*[-;]|\s+Flat\/Unit:|\s*$)/i
+  );
+  if (!m) return null;
+  const candidate = m[1].trim().toUpperCase();
+  // Check against known ambo call types (longest first to match most specific)
+  for (const type of AMBO_CALL_TYPES) {
+    if (candidate.startsWith(type)) return type;
+  }
+  // If the candidate text is reasonable length, use it as-is
+  if (candidate.length >= 3 && candidate.length <= 30) return candidate;
+  return null;
 }
 
 /**
  * Detect call type from message content.
+ * Tries ambo format extraction first, then falls back to keyword patterns.
  */
 function detectCallType(content) {
   if (!content) return null;
+  // Try NZ ambulance AMPDS format extraction
+  const amboType = detectAmboCallType(content);
+  if (amboType) return amboType;
+  // Fall back to keyword pattern matching (fire codes, generic types)
   for (const { pattern, type } of CALL_TYPE_PATTERNS) {
     if (pattern.test(content)) return type;
   }
   return null;
 }
 
+// ── Call type colour map (server-side, matches frontend CALL_TYPE_COLOURS) ──
+const CALL_TYPE_COLOUR_MAP = {
+  // Cardiac / critical
+  'ARREST': '#dc2626', 'CARDIAC PROBLEM': '#dc2626', 'CHEST PAIN': '#dc2626',
+  'HEART PROBLEM': '#dc2626', 'RESPIRATORY ARREST': '#dc2626',
+  // Breathing
+  'ABNORMAL BREATHING': '#16a34a', 'DIFFICULTY BREATHING': '#16a34a',
+  'INEFFECTIVE BREATHING': '#16a34a', 'CHOKING': '#16a34a',
+  // Neurological
+  'STROKE': '#9333ea', 'SEIZURE': '#9333ea', 'FITTING': '#9333ea',
+  'ALTERED LOC': '#9333ea', 'UNCONSCIOUS': '#9333ea',
+  'PARALYSIS': '#9333ea', 'WEAKNESS/NUMBNESS': '#9333ea',
+  // Trauma
+  'TRAUMA': '#7c3aed', 'FALL': '#7c3aed', 'MVA': '#7c3aed',
+  'ASSAULT': '#7c3aed', 'STAB/GSW': '#7c3aed',
+  'BURNS': '#ea580c', 'EYE INJURY': '#ea580c', 'BITE/ATTACK': '#ea580c',
+  // Medical general
+  'SICK PERSON': '#2563eb', 'ABDO PAIN': '#2563eb', 'BACK PAIN': '#2563eb',
+  'PAIN': '#2563eb', 'DIABETIC': '#2563eb', 'ALLERGY': '#2563eb',
+  'FAINT': '#2563eb', 'HEADACHE': '#2563eb', 'FEVER/CHILLS': '#2563eb',
+  'NAUSEA': '#2563eb', 'VOMITING': '#2563eb', 'DIZZINESS/VERTIGO': '#2563eb',
+  // Bleeding
+  'HAEMORRHAGE': '#b91c1c', 'SERIOUS HAEMORRHAGE': '#991b1b',
+  // Obstetric
+  'OBSTETRIC': '#db2777',
+  // Hazard
+  'CO/INH/HAZ': '#ca8a04', 'ELECTROCUTION': '#ca8a04', 'HEAT EXPOSURE': '#ca8a04',
+  // Water
+  'DROWNING': '#0284c7', 'NEAR DROWNING': '#0284c7',
+  // Mental health
+  'PSYCH/SUICIDE': '#475569', 'SUICIDAL IDEATION': '#475569', 'INTENDING SUICIDE': '#475569',
+  // Other
+  'COMMUNITY ALARM': '#64748b', 'UNKNOWN PROBLEM': '#6b7280',
+  'ACCIDENT': '#6366f1', 'ACUTE ADMISSION': '#0ea5e9',
+  'OVERDOSE': '#8b5cf6', 'POISONING': '#8b5cf6',
+  // FENZ fire codes
+  'FIREALM': '#f59e0b', 'STRU': '#dc2626', 'VEG': '#ea580c',
+  'MVC': '#7c3aed', 'MVCRESC': '#7c3aed', 'MVCHEVY': '#7c3aed',
+  'HAZ': '#ca8a04', 'HAZGAS': '#ca8a04', 'MED': '#16a34a',
+  'MEDFR': '#16a34a', 'MIN': '#2563eb', 'RESC': '#0891b2',
+  'WATRESC': '#0284c7', 'USAR': '#dc2626', 'SPRNKLR': '#64748b',
+  'NAT1': '#0284c7', 'NAT2': '#0284c7', 'NAT3': '#0284c7',
+  'SHIP': '#0284c7', 'ADV': '#f59e0b', 'EXERCISE': '#9ca3af',
+  'FIRETEST': '#9ca3af', 'STNCALL': '#64748b', 'TRA': '#7c3aed',
+  'TEST': '#9ca3af',
+};
+
 /**
  * Get colour for a call type.
  */
 function getCallTypeColour(callType) {
   if (!callType) return '#6b7280';
-  const entry = CALL_TYPE_PATTERNS.find((p) => p.type === callType);
-  return entry ? entry.colour : '#6b7280';
+  return CALL_TYPE_COLOUR_MAP[callType] || '#6b7280';
 }
 
 /**

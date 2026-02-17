@@ -518,17 +518,40 @@ router.put('/api/alarm-level-alert', requireAuth, (req, res) => {
   res.json({ ok: true, min_alarm_level: level });
 });
 
-// ─── FLEX incident dedup buffer ───
+// ─── FLEX fragment filtering and incident dedup ───
 // FLEX group pages send the same message to multiple capcodes simultaneously.
-// Some capcodes get truncated content. Buffer by incident number and keep the longest version.
+// multimon-ng outputs each capcode's portion separately, often with truncated
+// content and "(Part X of Y)" frame markers. Fragments arrive over 30-60 seconds.
+
+const FLEX_MIN_CONTENT_LENGTH = 20; // Drop FLEX fragments shorter than this
+
+/**
+ * Check if a FLEX message is a tiny junk fragment that should be dropped.
+ */
+function isJunkFlexFragment(msg) {
+  if (msg.protocol !== 'FLEX') return false;
+  return (msg.content || '').length < FLEX_MIN_CONTENT_LENGTH;
+}
+
+// Incident-based dedup buffer: collects FLEX messages with the same F-number
+// arriving within a short window, then inserts only the longest version.
 const incidentBuffer = new Map();
-const INCIDENT_BUFFER_MS = 5000; // 5 second window to collect all fragments
+const INCIDENT_BUFFER_MS = 15000; // 15 second window for the initial burst
 
 function bufferByIncident(msg) {
   // Only buffer FLEX messages with an incident number
   if (msg.protocol !== 'FLEX') return null;
   const incidentNum = parser.extractIncidentNumber(msg.content);
   if (!incidentNum) return null;
+
+  // DB-level dedup: if we already inserted a longer message with this F-number
+  // within the last 2 minutes, skip this shorter fragment
+  const existing = db.prepare(
+    "SELECT LENGTH(content) as len FROM messages WHERE content LIKE ? AND received_at > datetime('now', '-120 seconds') ORDER BY LENGTH(content) DESC LIMIT 1"
+  ).get(`%${incidentNum}%`);
+  if (existing && existing.len >= (msg.content || '').length) {
+    return { buffered: true }; // Already have a better version in DB
+  }
 
   let entry = incidentBuffer.get(incidentNum);
   if (!entry) {
@@ -663,10 +686,15 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
         msg.multipart_id = msg.capcode;
       }
 
+      // Drop tiny FLEX junk fragments (broken frame remnants)
+      if (isJunkFlexFragment(msg)) {
+        continue;
+      }
+
       // FLEX incident dedup: buffer FLEX messages with same F-number, keep longest
       const incResult = bufferByIncident(msg);
       if (incResult) {
-        // Message buffered - will be inserted after timeout with best version
+        // Message buffered or already have better version in DB
         continue;
       }
 

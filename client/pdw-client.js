@@ -59,14 +59,21 @@ const CONFIG = {
 };
 
 // ─── Content cleaning ───
-// Strips multimon-ng control character tags and fixes character mappings
+// Strips multimon-ng control character tags, fixes character mappings,
+// and cleans FLEX multipart frame markers.
 function cleanContent(content) {
   if (!content) return '';
-  return content
+  content = content
     .replace(/<[A-Za-z]{2,4}>/g, '')  // Strip <ETX>, <EOT>, <STX>, <NUL>, etc.
     .replace(/Ä/g, '[')               // Multimon-ng maps [ to Ä
-    .replace(/Ü/g, ']')               // Multimon-ng maps ] to Ü
-    .trim();
+    .replace(/Ü/g, ']');              // Multimon-ng maps ] to Ü
+
+  // Strip FLEX multipart frame markers inserted by multimon-ng
+  content = content.replace(/\(Part\s+\d+\s*(?:of\s*\d+\s*)?\)/gi, '');
+  content = content.replace(/\(Part\s*(?:\d+\s*(?:of\s*\d*\s*)?)?\s*$/gi, '');
+  content = content.replace(/^\s*\d+\s*(?:of\s*\d+\s*)?\)\s*/i, '');
+
+  return content.trim();
 }
 
 // ─── Dedup tracking ───
