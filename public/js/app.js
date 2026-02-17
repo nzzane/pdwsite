@@ -969,12 +969,13 @@
         el.innerHTML = `
           <div style="margin-bottom:0.75rem"><button class="btn btn-primary btn-sm" id="btn-add-user">Add User</button></div>
           <table class="admin-table">
-            <thead><tr><th>Username</th><th>Role</th><th>Created</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Username</th><th>Role</th><th>PW Change</th><th>Created</th><th>Actions</th></tr></thead>
             <tbody>
               ${users.map(u => `
                 <tr>
                   <td>${esc(u.username)}</td>
                   <td>${esc(u.role)}</td>
+                  <td>${u.must_change_password ? '<span style="color:var(--warning)">Pending</span>' : ''}</td>
                   <td>${esc(u.created_at)}</td>
                   <td class="admin-actions">
                     <button class="btn btn-sm" data-toggle-role="${u.id}" data-role="${u.role}">${u.role === 'admin' ? 'Make User' : 'Make Admin'}</button>
@@ -1187,6 +1188,7 @@
       <div class="form-group"><label>Username</label><input type="text" id="new-username"></div>
       <div class="form-group"><label>Password</label><input type="password" id="new-password"></div>
       <div class="form-group"><label>Role</label><select id="new-role"><option value="user">User</option><option value="admin">Admin</option></select></div>
+      <div class="form-group"><label class="checkbox-label"><input type="checkbox" id="new-must-change-pw" checked> Require password change on first login</label></div>
     `, `
       <button class="btn" id="modal-cancel">Cancel</button>
       <button class="btn btn-primary" id="modal-save">Create</button>
@@ -1196,9 +1198,10 @@
       const username = $('#new-username').value.trim();
       const password = $('#new-password').value;
       const role = $('#new-role').value;
+      const mustChangePw = $('#new-must-change-pw').checked;
       if (!username || !password) return toast('Username and password required', 'error');
       try {
-        await api('/api/auth/register', { method: 'POST', body: JSON.stringify({ username, password, role }) });
+        await api('/api/auth/register', { method: 'POST', body: JSON.stringify({ username, password, role, must_change_password: mustChangePw }) });
         hideModal();
         loadAdminTab('users');
         toast('User created', 'success');
@@ -1225,6 +1228,48 @@
         });
         hideModal();
         toast('Password changed', 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    };
+  }
+
+  function showForceChangePasswordModal() {
+    showModal('Change Your Password', `
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.75rem">
+        Your account requires a password change before you can continue. Please set a new password.
+      </p>
+      <div class="form-group"><label>Current Password</label><input type="password" id="force-cur-pw"></div>
+      <div class="form-group"><label>New Password</label><input type="password" id="force-new-pw"></div>
+      <div class="form-group"><label>Confirm New Password</label><input type="password" id="force-confirm-pw"></div>
+    `, `
+      <button class="btn btn-primary" id="modal-save">Change Password</button>
+    `);
+    // Prevent closing without changing password
+    $('#modal-close').onclick = null;
+    $('#modal-overlay').onclick = null;
+    $('#modal-save').onclick = async () => {
+      const curPw = $('#force-cur-pw').value;
+      const newPw = $('#force-new-pw').value;
+      const confirmPw = $('#force-confirm-pw').value;
+      if (!curPw || !newPw) return toast('All fields required', 'error');
+      if (newPw !== confirmPw) return toast('New passwords do not match', 'error');
+      if (newPw.length < 4) return toast('Password must be at least 4 characters', 'error');
+      try {
+        await api('/api/auth/change-password', {
+          method: 'POST',
+          body: JSON.stringify({ currentPassword: curPw, newPassword: newPw })
+        });
+        state.user.must_change_password = false;
+        hideModal();
+        // Restore normal modal close behaviour
+        $('#modal-close').onclick = hideModal;
+        $('#modal-overlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) hideModal(); });
+        toast('Password changed successfully', 'success');
+        // Show disclaimer if needed
+        if (!localStorage.getItem('pdw_disclaimer_accepted')) {
+          showDisclaimerModal();
+        }
       } catch (err) {
         toast(err.message, 'error');
       }
@@ -1483,8 +1528,11 @@
     autoSubscribePush();
     updateNotificationBell();
 
-    // Show first-login disclaimer if not yet accepted
-    if (!localStorage.getItem('pdw_disclaimer_accepted')) {
+    // Force password change if required
+    if (state.user.must_change_password) {
+      showForceChangePasswordModal();
+    } else if (!localStorage.getItem('pdw_disclaimer_accepted')) {
+      // Show first-login disclaimer if not yet accepted
       showDisclaimerModal();
     }
   }

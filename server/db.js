@@ -143,6 +143,13 @@ try {
   // Column already exists, ignore
 }
 
+// Add must_change_password column to users for forcing password change on first login
+try {
+  db.exec("ALTER TABLE users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");
+} catch (e) {
+  // Column already exists, ignore
+}
+
 // Add hidden column to capcode_aliases for filtering out junk capcodes
 try {
   db.exec("ALTER TABLE capcode_aliases ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");

@@ -49,10 +49,10 @@ router.post('/api/auth/login', async (req, res) => {
 
 router.post('/api/auth/register', requireAuth, requireAdmin, async (req, res) => {
   try {
-    const { username, password, role } = req.body;
+    const { username, password, role, must_change_password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
     if (role && role !== 'user' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
-    const result = await register(username, password, role || 'user');
+    const result = await register(username, password, role || 'user', !!must_change_password);
     res.json(result);
   } catch (err) {
     if (err.message && err.message.includes('UNIQUE')) {
@@ -63,7 +63,9 @@ router.post('/api/auth/register', requireAuth, requireAdmin, async (req, res) =>
 });
 
 router.get('/api/auth/me', requireAuth, (req, res) => {
-  res.json(req.user);
+  const user = db.prepare('SELECT id, username, role, must_change_password FROM users WHERE id = ?').get(req.user.id);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+  res.json({ ...user, must_change_password: !!user.must_change_password });
 });
 
 router.post('/api/auth/change-password', requireAuth, async (req, res) => {
@@ -75,7 +77,7 @@ router.post('/api/auth/change-password', requireAuth, async (req, res) => {
     const valid = await bcrypt.compare(currentPassword, user.password_hash);
     if (!valid) return res.status(401).json({ error: 'Current password incorrect' });
     const hash = await bcrypt.hash(newPassword, 12);
-    db.prepare('UPDATE users SET password_hash = ? WHERE id = ?').run(hash, req.user.id);
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, req.user.id);
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Password change failed' });
@@ -85,7 +87,7 @@ router.post('/api/auth/change-password', requireAuth, async (req, res) => {
 // ─── Admin: user management ───
 
 router.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
-  const users = db.prepare('SELECT id, username, role, created_at FROM users ORDER BY id').all();
+  const users = db.prepare('SELECT id, username, role, must_change_password, created_at FROM users ORDER BY id').all();
   res.json(users);
 });
 
@@ -690,7 +692,7 @@ function sendPushForMessage(msg) {
   }
 
   // ─── Keyword alert notifications ───
-  const content = (msg.content || '').toLowerCase();
+  // (reuse `content` from line above)
   if (!content) return;
 
   const keywordAlerts = db.prepare('SELECT DISTINCT ka.user_id, ka.keyword FROM keyword_alerts ka WHERE ka.notify = 1').all();

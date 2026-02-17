@@ -63,21 +63,21 @@ async function login(username, password) {
     config.JWT_SECRET,
     { expiresIn: config.JWT_EXPIRY }
   );
-  return { token, user: { id: user.id, username: user.username, role: user.role } };
+  return {
+    token,
+    user: { id: user.id, username: user.username, role: user.role, must_change_password: !!user.must_change_password },
+  };
 }
 
 /**
  * Register a new user account.
  */
-async function register(username, password, role = 'user') {
+async function register(username, password, role = 'user', mustChangePassword = false) {
   const hash = await bcrypt.hash(password, 12);
-  const result = db.prepare('INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)').run(username, hash, role);
-  const token = jwt.sign(
-    { id: result.lastInsertRowid, username, role },
-    config.JWT_SECRET,
-    { expiresIn: config.JWT_EXPIRY }
+  const result = db.prepare('INSERT INTO users (username, password_hash, role, must_change_password) VALUES (?, ?, ?, ?)').run(
+    username, hash, role, mustChangePassword ? 1 : 0
   );
-  return { token, user: { id: result.lastInsertRowid, username, role } };
+  return { user: { id: result.lastInsertRowid, username, role } };
 }
 
 module.exports = { requireAuth, requireAdmin, requireApiKey, login, register };
