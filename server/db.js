@@ -124,4 +124,24 @@ try {
   // Column already exists, ignore
 }
 
+// Add keyword_alerts table
+db.exec(`
+  CREATE TABLE IF NOT EXISTS keyword_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    keyword TEXT NOT NULL,
+    notify INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, keyword)
+  );
+`);
+
+// Normalize capcodes: strip leading zeros for consistent matching across FLEX/POCSAG
+try {
+  db.exec("UPDATE group_members SET capcode = CASE WHEN LENGTH(LTRIM(capcode, '0')) = 0 THEN '0' ELSE LTRIM(capcode, '0') END WHERE capcode LIKE '0%'");
+  db.exec("UPDATE capcode_aliases SET capcode = CASE WHEN LENGTH(LTRIM(capcode, '0')) = 0 THEN '0' ELSE LTRIM(capcode, '0') END WHERE capcode LIKE '0%'");
+} catch (e) {
+  // Migration may fail on duplicate after normalization, that's ok
+}
+
 module.exports = db;

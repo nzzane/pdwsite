@@ -157,7 +157,7 @@ router.get('/api/messages', requireAuth, (req, res) => {
   const conditions = [];
 
   if (group_id) {
-    sql += ' INNER JOIN group_members gm ON m.capcode = gm.capcode AND gm.group_id = ?';
+    sql += " INNER JOIN group_members gm ON LTRIM(m.capcode, '0') = LTRIM(gm.capcode, '0') AND gm.group_id = ?";
     params.push(parseInt(group_id, 10));
   }
 
@@ -200,10 +200,11 @@ router.get('/api/messages', requireAuth, (req, res) => {
   const messages = db.prepare(sql).all(...params);
 
   // Enrich with computed fields not stored in DB
+  const aliasStmt = db.prepare('SELECT alias, colour, icon, notes FROM capcode_aliases WHERE capcode = ?');
   for (const msg of messages) {
     const priority = parser.extractPriority(msg.content);
     if (priority) msg.priority = priority;
-    const alias = db.prepare('SELECT alias, colour, icon, notes FROM capcode_aliases WHERE capcode = ?').get(msg.capcode);
+    const alias = aliasStmt.get(parser.normalizeCapcode(msg.capcode));
     if (alias) {
       msg.alias = alias.alias;
       msg.alias_colour = alias.colour;
@@ -267,7 +268,7 @@ router.post('/api/groups', requireAuth, requireAdmin, (req, res) => {
     if (capcodes && Array.isArray(capcodes)) {
       const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
       for (const cap of capcodes) {
-        insert.run(groupId, cap);
+        insert.run(groupId, parser.normalizeCapcode(cap));
       }
     }
     res.json({ id: groupId, name, description, colour });
@@ -289,7 +290,7 @@ router.put('/api/groups/:id', requireAuth, requireAdmin, (req, res) => {
     db.prepare('DELETE FROM group_members WHERE group_id = ?').run(groupId);
     const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
     for (const cap of capcodes) {
-      insert.run(groupId, cap);
+      insert.run(groupId, parser.normalizeCapcode(cap));
     }
   }
   res.json({ ok: true });
@@ -315,20 +316,21 @@ router.get('/api/aliases', requireAuth, (req, res) => {
 router.post('/api/aliases', requireAuth, requireAdmin, (req, res) => {
   const { capcode, alias, colour, icon, call_type, location, notes, group_ids } = req.body;
   if (!capcode || !alias) return res.status(400).json({ error: 'Capcode and alias required' });
+  const normCapcode = parser.normalizeCapcode(capcode);
   try {
     db.prepare(
       'INSERT INTO capcode_aliases (capcode, alias, colour, icon, call_type, location, notes) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(capcode) DO UPDATE SET alias=?, colour=?, icon=?, call_type=?, location=?, notes=?'
-    ).run(capcode, alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null,
+    ).run(normCapcode, alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null,
       alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null);
 
     // Update group memberships if provided
     if (Array.isArray(group_ids)) {
       // Remove capcode from all groups first
-      db.prepare('DELETE FROM group_members WHERE capcode = ?').run(capcode);
+      db.prepare('DELETE FROM group_members WHERE capcode = ?').run(normCapcode);
       // Add to specified groups
       const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
       for (const gid of group_ids) {
-        insert.run(parseInt(gid, 10), capcode);
+        insert.run(parseInt(gid, 10), normCapcode);
       }
     }
 
@@ -339,7 +341,7 @@ router.post('/api/aliases', requireAuth, requireAdmin, (req, res) => {
 });
 
 router.delete('/api/aliases/:capcode', requireAuth, requireAdmin, (req, res) => {
-  db.prepare('DELETE FROM capcode_aliases WHERE capcode = ?').run(req.params.capcode);
+  db.prepare('DELETE FROM capcode_aliases WHERE capcode = ?').run(parser.normalizeCapcode(req.params.capcode));
   res.json({ ok: true });
 });
 
@@ -449,8 +451,9 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
       // Dedup check
       if (parser.isDuplicate(db, hash)) continue;
 
-      // Check capcode alias for overrides
-      const alias = db.prepare('SELECT * FROM capcode_aliases WHERE capcode = ?').get(msg.capcode);
+      // Check capcode alias for overrides (normalize to handle FLEX leading zeros)
+      const normCapcode = parser.normalizeCapcode(msg.capcode);
+      const alias = db.prepare('SELECT * FROM capcode_aliases WHERE capcode = ?').get(normCapcode);
 
       const finalCallType = callType || (alias && alias.call_type) || null;
       const finalLocation = location || (alias && alias.location) || null;
@@ -512,8 +515,39 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
   }
 });
 
+// ─── Keyword alerts ───
+
+router.get('/api/keyword-alerts', requireAuth, (req, res) => {
+  const alerts = db.prepare('SELECT * FROM keyword_alerts WHERE user_id = ? ORDER BY keyword').all(req.user.id);
+  res.json(alerts);
+});
+
+router.post('/api/keyword-alerts', requireAuth, (req, res) => {
+  const { keyword } = req.body;
+  if (!keyword || !keyword.trim()) return res.status(400).json({ error: 'Keyword required' });
+  try {
+    const result = db.prepare('INSERT INTO keyword_alerts (user_id, keyword) VALUES (?, ?)').run(
+      req.user.id, keyword.trim()
+    );
+    res.json({ id: result.lastInsertRowid, keyword: keyword.trim() });
+  } catch (err) {
+    if (err.message && err.message.includes('UNIQUE')) {
+      return res.status(409).json({ error: 'Keyword already exists' });
+    }
+    res.status(500).json({ error: 'Failed to add keyword alert' });
+  }
+});
+
+router.delete('/api/keyword-alerts/:id', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM keyword_alerts WHERE id = ? AND user_id = ?').run(
+    parseInt(req.params.id, 10), req.user.id
+  );
+  res.json({ ok: true });
+});
+
 /**
- * Send push notifications to users who have favourited groups containing this capcode.
+ * Send push notifications to users who have favourited groups containing this capcode,
+ * and to users with keyword alerts matching the message content.
  */
 function sendPushForMessage(msg) {
   if (!config.VAPID_PUBLIC_KEY || !config.VAPID_PRIVATE_KEY) return;
@@ -524,31 +558,63 @@ function sendPushForMessage(msg) {
     return;
   }
 
-  // Find groups this capcode belongs to
+  const normCapcode = parser.normalizeCapcode(msg.capcode);
+
+  // Find groups this capcode belongs to (normalize for FLEX/POCSAG matching)
   const groups = db.prepare(
-    'SELECT g.id, g.name FROM groups_ g JOIN group_members gm ON g.id = gm.group_id WHERE gm.capcode = ?'
-  ).all(msg.capcode);
+    "SELECT g.id, g.name FROM groups_ g JOIN group_members gm ON g.id = gm.group_id WHERE LTRIM(gm.capcode, '0') = ?"
+  ).all(normCapcode);
 
-  if (groups.length === 0) return;
+  // ─── Group-based notifications ───
+  if (groups.length > 0) {
+    const groupIds = groups.map((g) => g.id);
+    const placeholders = groupIds.map(() => '?').join(',');
+    const subs = db.prepare(`
+      SELECT DISTINCT ps.endpoint, ps.keys_json
+      FROM push_subscriptions ps
+      JOIN user_favourites uf ON ps.user_id = uf.user_id
+      WHERE uf.group_id IN (${placeholders}) AND uf.notify = 1
+    `).all(...groupIds);
 
-  const groupIds = groups.map((g) => g.id);
+    const groupNames = groups.map((g) => g.name).join(', ');
+    const payload = JSON.stringify({
+      title: `PDW: ${msg.call_type || 'Page'} - ${groupNames}`,
+      body: msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`,
+      data: { messageId: msg.id, capcode: msg.capcode },
+    });
 
-  // Find users who have favourited any of these groups with notify=1
-  const placeholders = groupIds.map(() => '?').join(',');
-  const subs = db.prepare(`
-    SELECT DISTINCT ps.endpoint, ps.keys_json
-    FROM push_subscriptions ps
-    JOIN user_favourites uf ON ps.user_id = uf.user_id
-    WHERE uf.group_id IN (${placeholders}) AND uf.notify = 1
-  `).all(...groupIds);
+    sendToSubscriptions(subs, payload);
+  }
 
-  const groupNames = groups.map((g) => g.name).join(', ');
-  const payload = JSON.stringify({
-    title: `PDW: ${msg.call_type || 'Page'} - ${groupNames}`,
-    body: msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`,
-    data: { messageId: msg.id, capcode: msg.capcode },
-  });
+  // ─── Keyword alert notifications ───
+  const content = (msg.content || '').toLowerCase();
+  if (!content) return;
 
+  const keywordAlerts = db.prepare('SELECT DISTINCT ka.user_id, ka.keyword FROM keyword_alerts ka WHERE ka.notify = 1').all();
+  const matchedUsers = new Map(); // user_id -> matched keywords
+
+  for (const ka of keywordAlerts) {
+    if (content.includes(ka.keyword.toLowerCase())) {
+      if (!matchedUsers.has(ka.user_id)) matchedUsers.set(ka.user_id, []);
+      matchedUsers.get(ka.user_id).push(ka.keyword);
+    }
+  }
+
+  for (const [userId, keywords] of matchedUsers) {
+    const subs = db.prepare('SELECT endpoint, keys_json FROM push_subscriptions WHERE user_id = ?').all(userId);
+    if (subs.length === 0) continue;
+
+    const payload = JSON.stringify({
+      title: `PDW Alert: ${keywords.join(', ')}`,
+      body: msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`,
+      data: { messageId: msg.id, capcode: msg.capcode, keywordMatch: true },
+    });
+
+    sendToSubscriptions(subs, payload);
+  }
+}
+
+function sendToSubscriptions(subs, payload) {
   for (const sub of subs) {
     const subscription = {
       endpoint: sub.endpoint,
@@ -556,7 +622,6 @@ function sendPushForMessage(msg) {
     };
     webpush.sendNotification(subscription, payload).catch((err) => {
       if (err.statusCode === 410 || err.statusCode === 404) {
-        // Subscription expired, remove it
         db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
       }
     });

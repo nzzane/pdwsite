@@ -19,6 +19,7 @@
     aliases: {},
     callTypes: [],
     filters: [],
+    keywordAlerts: [],
     searchPage: 0,
     searchLimit: 50,
   };
@@ -126,6 +127,68 @@
     const parenMatch = content.match(/^\([^)]+\)\s*/);
     if (parenMatch) return content.slice(parenMatch[0].length);
     return content;
+  }
+
+  // ─── Normalize capcode (strip leading zeros) ───
+  function normalizeCapcode(cap) {
+    if (!cap) return '';
+    const stripped = cap.replace(/^0+/, '');
+    return stripped || '0';
+  }
+
+  // ─── In-app notification sound (works on Safari and all browsers) ───
+  let audioCtx = null;
+  function playAlertSound() {
+    try {
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.connect(gain);
+      gain.connect(audioCtx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = 880;
+      gain.gain.value = 0.3;
+      osc.start();
+      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+      osc.stop(audioCtx.currentTime + 0.5);
+    } catch { /* Audio not available */ }
+  }
+
+  // ─── Check if message matches favourited groups or keyword alerts ───
+  function checkInAppAlert(msg) {
+    const normCap = normalizeCapcode(msg.capcode);
+    let matched = false;
+    let matchReason = '';
+
+    // Check favourited groups
+    for (const fav of state.favourites) {
+      const group = state.groups.find(g => g.id === fav.group_id);
+      if (group && group.members) {
+        const caps = group.members.map(m => normalizeCapcode(m.capcode));
+        if (caps.includes(normCap)) {
+          matched = true;
+          matchReason = fav.group_name;
+          break;
+        }
+      }
+    }
+
+    // Check keyword alerts
+    if (!matched) {
+      const content = (msg.content || '').toLowerCase();
+      for (const ka of state.keywordAlerts) {
+        if (content.includes(ka.keyword.toLowerCase())) {
+          matched = true;
+          matchReason = 'Keyword: ' + ka.keyword;
+          break;
+        }
+      }
+    }
+
+    if (matched) {
+      playAlertSound();
+      toast(`Alert [${matchReason}]: ${(msg.content || '').substring(0, 100)}`, 'info');
+    }
   }
 
   // ─── Extract priority colour from ambo/fire pages ───
@@ -322,6 +385,9 @@
 
   // ─── Handle new live message ───
   function handleNewMessage(msg) {
+    // Check in-app alerts even if paused (Safari fallback for push)
+    checkInAppAlert(msg);
+
     if (state.paused) return;
 
     // Check if message passes current filters
@@ -355,7 +421,7 @@
 
     if (search && !(msg.content || '').toLowerCase().includes(search)) return false;
     if (callType && msg.call_type !== callType) return false;
-    if (capcode && msg.capcode !== capcode) return false;
+    if (capcode && normalizeCapcode(msg.capcode) !== normalizeCapcode(capcode)) return false;
     if (location && !(msg.location || '').toLowerCase().includes(location)) return false;
     if (trucks && !(msg.trucks || '').toLowerCase().includes(trucks)) return false;
     if (groupId) {
@@ -371,23 +437,33 @@
   // ─── Load data ───
   async function loadInitialData() {
     try {
-      const [groups, favs, aliases, callTypes, filters] = await Promise.all([
+      const [groups, favs, aliases, callTypes, filters, keywordAlerts] = await Promise.all([
         api('/api/groups'),
         api('/api/favourites'),
         api('/api/aliases'),
         api('/api/messages/call-types'),
         api('/api/filters'),
+        api('/api/keyword-alerts'),
       ]);
 
       state.groups = groups;
       state.favourites = favs;
       state.callTypes = callTypes;
       state.filters = filters;
+      state.keywordAlerts = keywordAlerts;
 
       // Build alias map
       state.aliases = {};
       for (const a of aliases) {
         state.aliases[a.capcode] = a;
+      }
+
+      // Load group members for in-app alert matching
+      for (const g of state.groups) {
+        try {
+          const detail = await api(`/api/groups/${g.id}`);
+          g.members = detail.members || [];
+        } catch { /* ignore */ }
       }
 
       renderSidebar();
@@ -433,18 +509,22 @@
       `).join('');
     }
 
-    // Groups
+    // Groups (with favourite star toggle)
     const groupsEl = $('#sidebar-groups');
     if (state.groups.length === 0) {
       groupsEl.innerHTML = '<span style="font-size:0.8rem;color:var(--text-muted);padding:0.25rem 0.625rem">No groups yet</span>';
     } else {
-      groupsEl.innerHTML = state.groups.map(g => `
-        <a href="#" class="nav-item" data-view="live" data-group-filter="${g.id}">
-          <span class="colour-dot" style="background:${esc(g.colour)}"></span>
-          ${esc(g.name)}
-          <span class="nav-badge">${g.member_count || 0}</span>
-        </a>
-      `).join('');
+      groupsEl.innerHTML = state.groups.map(g => {
+        const isFav = state.favourites.some(f => f.group_id === g.id);
+        return `
+          <div class="nav-item" data-group-filter="${g.id}">
+            <span class="colour-dot" style="background:${esc(g.colour)}"></span>
+            <span style="flex:1;cursor:pointer" data-group-click="${g.id}">${esc(g.name)}</span>
+            <span class="nav-badge">${g.member_count || 0}</span>
+            <button class="fav-star ${isFav ? 'active' : ''}" data-fav-group="${g.id}" title="${isFav ? 'Remove from favourites' : 'Add to favourites'}">${isFav ? '\u2605' : '\u2606'}</button>
+          </div>
+        `;
+      }).join('');
     }
 
     // Saved filters
@@ -459,6 +539,32 @@
       `).join('');
     }
 
+    // Keyword alerts
+    const keywordsEl = $('#sidebar-keywords');
+    if (state.keywordAlerts.length === 0) {
+      keywordsEl.innerHTML = '<span style="font-size:0.8rem;color:var(--text-muted);padding:0.25rem 0.625rem">No keyword alerts</span>';
+    } else {
+      keywordsEl.innerHTML = state.keywordAlerts.map(ka => `
+        <div class="keyword-item">
+          <span class="keyword-text">${esc(ka.keyword)}</span>
+          <button class="keyword-remove" data-remove-keyword="${ka.id}" title="Remove">&times;</button>
+        </div>
+      `).join('');
+    }
+
+    // Keyword alert remove handlers
+    keywordsEl.querySelectorAll('[data-remove-keyword]').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        try {
+          await api(`/api/keyword-alerts/${btn.dataset.removeKeyword}`, { method: 'DELETE' });
+          state.keywordAlerts = await api('/api/keyword-alerts');
+          renderSidebar();
+          toast('Keyword alert removed', 'success');
+        } catch (err) { toast(err.message, 'error'); }
+      });
+    });
+
     // Click handlers for sidebar items
     favsEl.querySelectorAll('[data-group-filter]').forEach(el => {
       el.addEventListener('click', (e) => {
@@ -469,13 +575,21 @@
         closeSidebar();
       });
     });
-    groupsEl.querySelectorAll('[data-group-filter]').forEach(el => {
+    // Group name click -> filter by group
+    groupsEl.querySelectorAll('[data-group-click]').forEach(el => {
       el.addEventListener('click', (e) => {
         e.preventDefault();
-        $('#filter-group').value = el.dataset.groupFilter;
+        $('#filter-group').value = el.dataset.groupClick;
         switchView('live');
         applyFilters();
         closeSidebar();
+      });
+    });
+    // Group favourite star click
+    groupsEl.querySelectorAll('[data-fav-group]').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleFavourite(parseInt(btn.dataset.favGroup, 10));
       });
     });
     filtersEl.querySelectorAll('[data-saved-filter]').forEach(el => {
@@ -643,19 +757,22 @@
         el.innerHTML = `
           <div style="margin-bottom:0.75rem"><button class="btn btn-primary btn-sm" id="btn-add-group">Add Group</button></div>
           <table class="admin-table">
-            <thead><tr><th>Name</th><th>Colour</th><th>Members</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Name</th><th>Colour</th><th>Members</th><th>Fav</th><th>Actions</th></tr></thead>
             <tbody>
-              ${groups.map(g => `
+              ${groups.map(g => {
+                const isFav = state.favourites.some(f => f.group_id === g.id);
+                return `
                 <tr>
                   <td>${esc(g.name)}</td>
                   <td><span class="colour-dot" style="background:${esc(g.colour)}"></span>${esc(g.colour)}</td>
                   <td>${g.member_count || 0}</td>
+                  <td><button class="fav-star ${isFav ? 'active' : ''}" data-fav-group="${g.id}" title="${isFav ? 'Remove from favourites' : 'Add to favourites'}">${isFav ? '\u2605' : '\u2606'}</button></td>
                   <td class="admin-actions">
                     <button class="btn btn-sm" data-edit-group="${g.id}">Edit</button>
                     <button class="btn btn-sm btn-danger" data-delete-group="${g.id}">Delete</button>
                   </td>
                 </tr>
-              `).join('')}
+              `}).join('')}
             </tbody>
           </table>
         `;
@@ -670,6 +787,12 @@
               loadAdminTab('groups');
               toast('Group deleted', 'success');
             }
+          };
+        });
+        el.querySelectorAll('[data-fav-group]').forEach(btn => {
+          btn.onclick = async () => {
+            await toggleFavourite(parseInt(btn.dataset.favGroup, 10));
+            loadAdminTab('groups');
           };
         });
       } catch (err) {
@@ -996,6 +1119,34 @@
     };
   }
 
+  // ─── Keyword alert modal ───
+  function showAddKeywordModal() {
+    showModal('Add Keyword Alert', `
+      <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.75rem">
+        Get an in-app alert (with sound) when a message contains this keyword or address.
+        Works in all browsers including Safari.
+      </p>
+      <div class="form-group"><label>Keyword or Address</label><input type="text" id="keyword-input" placeholder="e.g. 3rd alarm, 123 Main St"></div>
+    `, `
+      <button class="btn" id="modal-cancel">Cancel</button>
+      <button class="btn btn-primary" id="modal-save">Add Alert</button>
+    `);
+    $('#modal-cancel').onclick = hideModal;
+    $('#modal-save').onclick = async () => {
+      const keyword = $('#keyword-input').value.trim();
+      if (!keyword) return toast('Keyword required', 'error');
+      try {
+        await api('/api/keyword-alerts', { method: 'POST', body: JSON.stringify({ keyword }) });
+        state.keywordAlerts = await api('/api/keyword-alerts');
+        renderSidebar();
+        hideModal();
+        toast('Keyword alert added', 'success');
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    };
+  }
+
   // ─── Push notifications ───
   async function enableNotifications() {
     if (!('serviceWorker' in navigator)) {
@@ -1005,14 +1156,14 @@
     if (!('Notification' in window)) {
       const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
       if (isIOS) {
-        toast('On iOS, install this app to your Home Screen first (Share > Add to Home Screen), then try again.', 'error');
+        toast('For push: install to Home Screen (Share > Add to Home Screen). In-app alerts with sound work now!', 'info');
       } else {
-        toast('Notifications not supported. Ensure you are using HTTPS and a modern browser.', 'error');
+        toast('Push not available. In-app alerts with sound still work while the app is open.', 'info');
       }
       return;
     }
     if (!('PushManager' in window)) {
-      toast('Push notifications not supported in this browser. Try Chrome or Firefox.', 'error');
+      toast('Push not available in this browser. In-app alerts with sound still work while the app is open.', 'info');
       return;
     }
     const permission = await Notification.requestPermission();
@@ -1023,7 +1174,7 @@
     try {
       const { publicKey } = await api('/api/push/vapid-key');
       if (!publicKey) {
-        toast('Push not configured on server (no VAPID keys)', 'error');
+        toast('Push not configured on server (no VAPID keys). In-app alerts still work.', 'error');
         return;
       }
       const reg = await navigator.serviceWorker.ready;
@@ -1032,9 +1183,9 @@
         applicationServerKey: urlBase64ToUint8Array(publicKey),
       });
       await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: sub.toJSON() }) });
-      toast('Notifications enabled', 'success');
+      toast('Push notifications enabled! You will also get in-app alerts with sound.', 'success');
     } catch (err) {
-      toast('Failed to enable notifications: ' + err.message, 'error');
+      toast('Push failed: ' + err.message + '. In-app alerts with sound still work while the app is open.', 'error');
     }
   }
 
@@ -1295,6 +1446,9 @@
       state.paused = !state.paused;
       $('#btn-pause').textContent = state.paused ? 'Resume' : 'Pause';
     });
+
+    // Keyword alert add button
+    $('#btn-add-keyword').addEventListener('click', showAddKeywordModal);
 
     // Stats refresh
     $('#btn-refresh-stats').addEventListener('click', loadStats);

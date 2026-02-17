@@ -146,6 +146,16 @@ function extractPriority(content) {
 }
 
 /**
+ * Normalize a capcode by stripping leading zeros.
+ * Ensures FLEX (e.g. 0001234567) and POCSAG (e.g. 1234567) match consistently.
+ */
+function normalizeCapcode(capcode) {
+  if (!capcode) return '';
+  const stripped = capcode.replace(/^0+/, '');
+  return stripped || '0';
+}
+
+/**
  * Generate a dedup hash for a message.
  */
 function dedupeHash(capcode, content) {
@@ -352,6 +362,7 @@ module.exports = {
   extractTrucks,
   extractIncidentNumber,
   extractPriority,
+  normalizeCapcode,
   dedupeHash,
   isDuplicate,
   parseMultipart,
