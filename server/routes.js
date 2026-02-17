@@ -242,6 +242,30 @@ router.get('/api/messages/stats', requireAuth, (req, res) => {
   const topCapcodes = db.prepare(
     "SELECT capcode, COUNT(*) as count FROM messages WHERE received_at > datetime('now', '-1 day') GROUP BY capcode ORDER BY count DESC LIMIT 20"
   ).all();
+
+  // Enrich top capcodes with alias and recent trucks
+  const aliasStmt = db.prepare('SELECT alias, colour FROM capcode_aliases WHERE capcode = ?');
+  const trucksStmt = db.prepare(
+    "SELECT DISTINCT trucks FROM messages WHERE capcode = ? AND trucks IS NOT NULL AND trucks != '' AND received_at > datetime('now', '-1 day') ORDER BY received_at DESC LIMIT 5"
+  );
+  for (const cc of topCapcodes) {
+    const normCap = parser.normalizeCapcode(cc.capcode);
+    const alias = aliasStmt.get(normCap);
+    if (alias) {
+      cc.alias = alias.alias;
+      cc.alias_colour = alias.colour;
+    }
+    const truckRows = trucksStmt.all(cc.capcode);
+    const truckSet = new Set();
+    for (const r of truckRows) {
+      for (const t of r.trucks.split(',')) {
+        const trimmed = t.trim();
+        if (trimmed) truckSet.add(trimmed);
+      }
+    }
+    if (truckSet.size > 0) cc.trucks = Array.from(truckSet).slice(0, 5);
+  }
+
   res.json({ total, today, callTypes, topCapcodes });
 });
 
@@ -402,6 +426,15 @@ router.post('/api/favourites/:groupId', requireAuth, (req, res) => {
   } catch (err) {
     res.status(500).json({ error: 'Failed to add favourite' });
   }
+});
+
+router.put('/api/favourites/:groupId/notify', requireAuth, (req, res) => {
+  const groupId = parseInt(req.params.groupId, 10);
+  const notify = req.body.notify ? 1 : 0;
+  db.prepare('UPDATE user_favourites SET notify = ? WHERE user_id = ? AND group_id = ?').run(
+    notify, req.user.id, groupId
+  );
+  res.json({ ok: true });
 });
 
 router.delete('/api/favourites/:groupId', requireAuth, (req, res) => {
@@ -816,6 +849,15 @@ router.post('/api/keyword-alerts', requireAuth, (req, res) => {
     }
     res.status(500).json({ error: 'Failed to add keyword alert' });
   }
+});
+
+router.put('/api/keyword-alerts/:id/notify', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const notify = req.body.notify ? 1 : 0;
+  db.prepare('UPDATE keyword_alerts SET notify = ? WHERE id = ? AND user_id = ?').run(
+    notify, id, req.user.id
+  );
+  res.json({ ok: true });
 });
 
 router.delete('/api/keyword-alerts/:id', requireAuth, (req, res) => {

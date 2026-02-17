@@ -901,8 +901,19 @@
         </li>
       `).join('');
       let capcodeHtml = stats.topCapcodes.map(cc => {
-        const alias = state.aliases[cc.capcode];
-        return `<li><span>${esc(cc.capcode)}${alias ? ' (' + esc(alias.alias) + ')' : ''}</span><span>${cc.count}</span></li>`;
+        const colour = cc.alias_colour || '#6b7280';
+        const aliasName = cc.alias || '';
+        const trucksStr = cc.trucks ? cc.trucks.join(', ') : '';
+        return `<li>
+          <span style="display:flex;flex-direction:column;gap:0.125rem;min-width:0">
+            <span style="display:flex;align-items:center;gap:0.375rem">
+              <span class="colour-dot" style="background:${esc(colour)}"></span>
+              <span>${esc(cc.capcode)}${aliasName ? ' <b>' + esc(aliasName) + '</b>' : ''}</span>
+            </span>
+            ${trucksStr ? '<span class="stat-trucks">' + esc(trucksStr) + '</span>' : ''}
+          </span>
+          <span>${cc.count}</span>
+        </li>`;
       }).join('');
 
       el.innerHTML = `
@@ -914,6 +925,181 @@
     } catch (err) {
       toast('Failed to load stats', 'error');
     }
+  }
+
+  // ─── Notifications settings view ───
+  async function loadNotifications() {
+    const el = $('#notifications-content');
+    if (!el) return;
+
+    // Check current push status
+    let pushActive = false;
+    try {
+      if (isSecureContext() && 'serviceWorker' in navigator && 'PushManager' in window &&
+          'Notification' in window && Notification.permission === 'granted') {
+        const reg = await navigator.serviceWorker.getRegistration('/');
+        if (reg) {
+          const sub = await reg.pushManager.getSubscription();
+          pushActive = !!sub;
+        }
+      }
+    } catch { /* ignore */ }
+
+    // Build group notifications list
+    let groupsHtml = '';
+    if (state.favourites.length === 0) {
+      groupsHtml = '<div class="notif-empty">No favourited groups. Add groups to favourites from the sidebar to receive notifications.</div>';
+    } else {
+      groupsHtml = state.favourites.map(f => {
+        const group = state.groups.find(g => g.id === f.group_id);
+        const colour = f.group_colour || (group ? group.colour : '#6b7280');
+        return `
+          <div class="notif-item">
+            <div class="notif-item-label">
+              <span class="colour-dot" style="background:${esc(colour)}"></span>
+              ${esc(f.group_name)}
+            </div>
+            <label class="notif-toggle">
+              <input type="checkbox" ${f.notify ? 'checked' : ''} data-fav-notify="${f.group_id}">
+              <span class="slider"></span>
+            </label>
+          </div>
+        `;
+      }).join('');
+    }
+
+    // Build keyword alerts list
+    let keywordsHtml = '';
+    if (state.keywordAlerts.length === 0) {
+      keywordsHtml = '<div class="notif-empty">No keyword alerts. Add keywords from the sidebar to get notified when they appear in pages.</div>';
+    } else {
+      keywordsHtml = state.keywordAlerts.map(ka => `
+        <div class="notif-item">
+          <div class="notif-item-label">${esc(ka.keyword)}</div>
+          <label class="notif-toggle">
+            <input type="checkbox" ${ka.notify ? 'checked' : ''} data-keyword-notify="${ka.id}">
+            <span class="slider"></span>
+          </label>
+        </div>
+      `).join('');
+    }
+
+    // Alarm level
+    const alarmVal = state.alarmLevelSetting || '';
+    const alarmOptions = [
+      { val: '', label: 'Off' },
+      { val: '2', label: '2nd Alarm and above' },
+      { val: '3', label: '3rd Alarm and above' },
+      { val: '4', label: '4th Alarm and above' },
+      { val: '5', label: '5th Alarm only' },
+    ];
+
+    el.innerHTML = `
+      <div class="notif-section">
+        <h3>Push Notifications</h3>
+        <div class="notif-status">
+          <span class="notif-status-label">Browser push</span>
+          <span class="notif-status-badge ${pushActive ? 'on' : 'off'}">
+            ${pushActive ? 'ON' : 'OFF'}
+          </span>
+        </div>
+        <button class="btn btn-sm ${pushActive ? 'btn-danger' : 'btn-primary'}" id="notif-push-toggle" style="margin-top:0.5rem">
+          ${pushActive ? 'Disable Push' : 'Enable Push'}
+        </button>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem">
+          Push notifications are sent when pages match your favourited groups, keyword alerts, or alarm level settings below.
+        </p>
+      </div>
+
+      <div class="notif-section">
+        <h3>Group Notifications</h3>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem">
+          Toggle notifications for each of your favourited groups.
+        </p>
+        ${groupsHtml}
+      </div>
+
+      <div class="notif-section">
+        <h3>Keyword Alerts</h3>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem">
+          Toggle notifications for each keyword. Add new keywords from the sidebar.
+        </p>
+        ${keywordsHtml}
+      </div>
+
+      <div class="notif-section">
+        <h3>Alarm Level Alerts</h3>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem">
+          Get notified on multi-alarm fires.
+        </p>
+        <select id="notif-alarm-level" class="filter-select" style="width:100%">
+          ${alarmOptions.map(o => `<option value="${o.val}" ${o.val === String(alarmVal) ? 'selected' : ''}>${o.label}</option>`).join('')}
+        </select>
+      </div>
+    `;
+
+    // Bind push toggle
+    el.querySelector('#notif-push-toggle').addEventListener('click', async () => {
+      await toggleNotifications();
+      loadNotifications(); // Refresh view
+    });
+
+    // Bind group notify toggles
+    el.querySelectorAll('[data-fav-notify]').forEach(input => {
+      input.addEventListener('change', async () => {
+        const groupId = parseInt(input.dataset.favNotify, 10);
+        try {
+          await api(`/api/favourites/${groupId}/notify`, {
+            method: 'PUT',
+            body: JSON.stringify({ notify: input.checked }),
+          });
+          // Update local state
+          const fav = state.favourites.find(f => f.group_id === groupId);
+          if (fav) fav.notify = input.checked ? 1 : 0;
+          renderSidebar();
+        } catch (err) {
+          toast('Failed to update: ' + err.message, 'error');
+          input.checked = !input.checked;
+        }
+      });
+    });
+
+    // Bind keyword notify toggles
+    el.querySelectorAll('[data-keyword-notify]').forEach(input => {
+      input.addEventListener('change', async () => {
+        const id = parseInt(input.dataset.keywordNotify, 10);
+        try {
+          await api(`/api/keyword-alerts/${id}/notify`, {
+            method: 'PUT',
+            body: JSON.stringify({ notify: input.checked }),
+          });
+          // Update local state
+          const ka = state.keywordAlerts.find(k => k.id === id);
+          if (ka) ka.notify = input.checked ? 1 : 0;
+        } catch (err) {
+          toast('Failed to update: ' + err.message, 'error');
+          input.checked = !input.checked;
+        }
+      });
+    });
+
+    // Bind alarm level
+    el.querySelector('#notif-alarm-level').addEventListener('change', async (e) => {
+      const level = e.target.value || null;
+      try {
+        await api('/api/alarm-level-alert', {
+          method: 'PUT',
+          body: JSON.stringify({ min_alarm_level: level }),
+        });
+        state.alarmLevelSetting = level ? parseInt(level, 10) : null;
+        // Sync sidebar dropdown
+        const sidebarSelect = $('#alarm-level-select');
+        if (sidebarSelect) sidebarSelect.value = level || '';
+        toast('Alarm level updated', 'success');
+      } catch (err) {
+        toast('Failed to update: ' + err.message, 'error');
+      }
+    });
   }
 
   // ─── Admin panel ───
@@ -1394,6 +1580,37 @@
   }
 
   // ─── Push notifications ───
+  async function toggleNotifications() {
+    // Check if already subscribed - if so, disable
+    try {
+      if (isSecureContext() && 'serviceWorker' in navigator && 'PushManager' in window) {
+        const reg = await navigator.serviceWorker.getRegistration('/');
+        if (reg) {
+          const sub = await reg.pushManager.getSubscription();
+          if (sub) {
+            // Currently enabled - disable
+            await disableNotifications(sub);
+            return;
+          }
+        }
+      }
+    } catch { /* Fall through to enable */ }
+    // Not subscribed - enable
+    await enableNotifications();
+  }
+
+  async function disableNotifications(sub) {
+    try {
+      const endpoint = sub.endpoint;
+      await sub.unsubscribe();
+      await api('/api/push/subscribe', { method: 'DELETE', body: JSON.stringify({ endpoint }) });
+      toast('Push notifications disabled.', 'info');
+      updateNotificationBell();
+    } catch (err) {
+      toast('Failed to disable notifications: ' + err.message, 'error');
+    }
+  }
+
   async function enableNotifications() {
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
     const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
@@ -1508,6 +1725,7 @@
     $$('.nav-item[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === view));
 
     if (view === 'stats') loadStats();
+    if (view === 'notifications') loadNotifications();
     if (view === 'admin') loadAdminTab(state.currentAdminTab);
     if (view === 'search') doSearch(0);
   }
@@ -1731,8 +1949,8 @@
     // Detail backdrop click to close
     $('#detail-backdrop').addEventListener('click', hideDetail);
 
-    // Notifications
-    $('#btn-notifications').addEventListener('click', enableNotifications);
+    // Notifications - toggle on/off
+    $('#btn-notifications').addEventListener('click', toggleNotifications);
 
     // Test push button (if exists - added in admin settings)
     document.addEventListener('click', async (e) => {
@@ -1865,10 +2083,16 @@
     try {
       const bell = $('#btn-notifications');
       if (!bell) return;
-      if (!isSecureContext() || !('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+      if (!isSecureContext() || !('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+        bell.classList.remove('notifications-active');
+        bell.classList.add('notifications-off');
+        bell.title = 'Notifications not available';
+        return;
+      }
       if (Notification.permission !== 'granted') {
         bell.classList.remove('notifications-active');
-        bell.title = 'Enable notifications';
+        bell.classList.add('notifications-off');
+        bell.title = 'Click to enable notifications';
         return;
       }
       const reg = await navigator.serviceWorker.getRegistration('/');
@@ -1876,10 +2100,12 @@
       const sub = await reg.pushManager.getSubscription();
       if (sub) {
         bell.classList.add('notifications-active');
-        bell.title = 'Notifications enabled';
+        bell.classList.remove('notifications-off');
+        bell.title = 'Notifications ON - click to disable';
       } else {
         bell.classList.remove('notifications-active');
-        bell.title = 'Enable notifications';
+        bell.classList.add('notifications-off');
+        bell.title = 'Notifications OFF - click to enable';
       }
     } catch { /* ignore */ }
   }
