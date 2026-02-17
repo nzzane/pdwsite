@@ -61,27 +61,15 @@ sudo apt install rtl-sdr multimon-ng
 npm install
 ```
 
-### 2. Configure
+### 2. Configure (optional)
 
 ```bash
 cp .env.example .env
-# Edit .env - at minimum set JWT_SECRET and API_KEY
+# All secrets (JWT_SECRET, API_KEY, VAPID keys) are auto-generated if not set.
+# Edit .env only if you need to customise values.
 ```
 
-### 3. Generate VAPID keys (for push notifications)
-
-```bash
-npm run generate-vapid
-# Copy the output keys into your .env file
-```
-
-### 4. Create admin account
-
-```bash
-npm run setup
-```
-
-### 5. Start the server
+### 3. Start the server
 
 ```bash
 npm start
@@ -89,7 +77,7 @@ npm start
 
 The server runs on `http://localhost:3000` by default.
 
-### 6. Start the client script (on the RTL-SDR machine)
+### 4. Start the client script (on the RTL-SDR machine)
 
 ```bash
 API_KEY=your-api-key SERVER_URL=http://your-server:3000 npm run client
@@ -109,24 +97,25 @@ The easiest way to run the server. Docker handles health checks, automatic resta
 ### Quick start
 
 ```bash
-# Create your .env file
-cat > .env << 'EOF'
-JWT_SECRET=change-me-to-a-long-random-string
-API_KEY=change-me-shared-secret-for-client
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=changeme
-EOF
-
-# Start the server
+# No .env file needed — just run it:
 docker compose up -d
 ```
 
-That's it. The container will:
-- Auto-create the admin account on first boot
-- Auto-generate VAPID keys for push notifications (persisted to the data volume)
+That's it. On first boot the container will automatically:
+- **Auto-generate secrets**: JWT_SECRET, API_KEY, and VAPID keys (persisted to the data volume)
+- **Auto-create an admin account**: `admin` / `changeme` (change the password after first login)
 - Restart automatically if it crashes or the host reboots
 - Health-check itself every 30 seconds and self-heal if unresponsive
-- Persist the database and keys in a named Docker volume (`pdw-data`)
+- Persist the database and all keys in a named Docker volume (`pdw-data` → `/data/`)
+
+To override defaults, create a `.env` file before starting:
+
+```bash
+# Optional — only if you want to customise:
+ADMIN_USERNAME=myadmin
+ADMIN_PASSWORD=my-secure-password
+PDW_PORT=8080
+```
 
 ### Management commands
 
@@ -164,7 +153,8 @@ PDW_PORT=8080 docker compose up -d
 | **Self-healing** | `restart: unless-stopped` + health checks = auto-restart on crash |
 | **Health checks** | Hits `/api/health` every 30s, restarts after 3 consecutive failures |
 | **Graceful shutdown** | Tini as PID 1, SIGTERM handling, 15s drain period |
-| **Data persistence** | SQLite DB + VAPID keys stored in `pdw-data` Docker volume |
+| **Auto-generated secrets** | JWT_SECRET, API_KEY, and VAPID keys generated on first run, persisted in volume |
+| **Data persistence** | SQLite DB + secrets + VAPID keys stored in `pdw-data` Docker volume (`/data/`) |
 | **Resource limits** | Capped at 512MB RAM / 1 CPU to prevent runaway usage |
 | **Security hardening** | Read-only filesystem, no-new-privileges, non-root user |
 | **Log rotation** | JSON log driver capped at 3x10MB files |
@@ -196,10 +186,10 @@ API_KEY=your-api-key SERVER_URL=http://docker-host:3000 node client/pdw-client.j
 |----------|---------|-------------|
 | `PORT` | `3000` | Server port |
 | `HOST` | `0.0.0.0` | Server bind address |
-| `JWT_SECRET` | random | Secret for JWT tokens |
-| `API_KEY` | `change-me-pdw-api-key` | Shared key for client ingestion |
-| `VAPID_PUBLIC_KEY` | (empty) | Web Push public key |
-| `VAPID_PRIVATE_KEY` | (empty) | Web Push private key |
+| `JWT_SECRET` | auto-generated | Secret for JWT tokens (persisted to `/data/.jwt-secret`) |
+| `API_KEY` | auto-generated | Shared key for client ingestion (persisted to `/data/.api-key`, manageable via Admin Panel) |
+| `VAPID_PUBLIC_KEY` | auto-generated | Web Push public key (persisted to `/data/.vapid-keys`) |
+| `VAPID_PRIVATE_KEY` | auto-generated | Web Push private key (persisted to `/data/.vapid-keys`) |
 | `VAPID_EMAIL` | `mailto:admin@example.com` | VAPID contact email |
 | `DEDUP_WINDOW_MS` | `30000` | Dedup window in milliseconds |
 | `MULTIPART_TIMEOUT_MS` | `10000` | Multipart join timeout |
@@ -216,6 +206,7 @@ After logging in as admin:
 - **Groups**: Create region/category groups and assign capcodes to them
 - **Capcode Aliases**: Give friendly names to capcodes (e.g. "Wellington Fire" for capcode 1234567)
 - **User Management**: Create/delete user accounts, toggle admin roles
+- **Settings**: View, copy, and regenerate the API key used for client ingestion
 
 ## API Reference
 
@@ -232,5 +223,8 @@ All API endpoints require authentication via `Authorization: Bearer <token>` hea
 | POST | `/api/groups` | Create group (admin only) |
 | GET | `/api/favourites` | List user favourites |
 | POST | `/api/favourites/:groupId` | Add favourite |
+| GET | `/api/admin/settings` | Get admin settings (admin only) |
+| PUT | `/api/admin/settings` | Update admin settings (admin only) |
+| POST | `/api/admin/settings/regenerate-api-key` | Regenerate API key (admin only) |
 | POST | `/api/ingest` | Ingest messages (API key auth) |
 | GET | `/api/health` | Health check (no auth, used by Docker) |
