@@ -79,11 +79,14 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
-
+    networks:
+      br0.50:
+        ipv4_address: 10.20.50.30
+        
 volumes:
   pdw-data:
     driver: local
 
 networks:
-  proxynet:
+  br0.50:
     external: true
