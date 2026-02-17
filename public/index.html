@@ -157,10 +157,6 @@
           <select id="filter-group" class="filter-select">
             <option value="">All Groups</option>
           </select>
-          <label class="filter-toggle" title="Hide test pages">
-            <input type="checkbox" id="filter-hide-test" checked>
-            <span>Hide tests</span>
-          </label>
           <button id="btn-clear-filters" class="btn-filter-icon" aria-label="Clear filters" title="Clear filters">
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
           </button>
@@ -175,6 +171,10 @@
         <div class="view-header">
           <h2>Live Feed</h2>
           <div class="view-actions">
+            <label class="toggle-label" title="Hide test pages">
+              <input type="checkbox" id="filter-hide-test" checked>
+              Hide tests
+            </label>
             <label class="toggle-label">
               <input type="checkbox" id="toggle-autoscroll" checked>
               Auto-scroll
@@ -230,6 +230,9 @@
       <div id="modal-footer" class="modal-footer"></div>
     </div>
   </div>
+
+  <!-- Detail panel backdrop -->
+  <div id="detail-backdrop" class="detail-backdrop"></div>
 
   <!-- Message detail panel (slide-up on mobile) -->
   <div id="detail-panel" class="detail-panel hidden">

@@ -314,6 +314,14 @@
   }
 
   // ─── Message detail panel ───
+  // ─── Measure actual topbar height and set CSS variable ───
+  function updateTopbarHeight() {
+    const topbar = document.querySelector('.topbar');
+    if (topbar) {
+      document.documentElement.style.setProperty('--topbar-actual-h', topbar.offsetHeight + 'px');
+    }
+  }
+
   function showDetail(msg) {
     const panel = $('#detail-panel');
     const content = $('#detail-content');
@@ -346,12 +354,18 @@
     }
 
     panel.classList.remove('hidden');
-    requestAnimationFrame(() => panel.classList.add('visible'));
+    const backdrop = $('#detail-backdrop');
+    requestAnimationFrame(() => {
+      panel.classList.add('visible');
+      backdrop.classList.add('visible');
+    });
   }
 
   function hideDetail() {
     const panel = $('#detail-panel');
+    const backdrop = $('#detail-backdrop');
     panel.classList.remove('visible');
+    backdrop.classList.remove('visible');
     setTimeout(() => panel.classList.add('hidden'), 250);
   }
 
@@ -423,6 +437,14 @@
 
   // ─── Handle new live message ───
   function handleNewMessage(msg) {
+    // Flash the status dot to indicate incoming data
+    const statusDot = $('#connection-status');
+    if (statusDot) {
+      statusDot.classList.remove('data-flash');
+      void statusDot.offsetWidth; // force reflow to restart animation
+      statusDot.classList.add('data-flash');
+    }
+
     // Check in-app alerts even if paused (Safari fallback for push)
     checkInAppAlert(msg);
 
@@ -1383,6 +1405,7 @@
     $('#app-screen').classList.add('active');
     $('#user-info').textContent = `${state.user.username} (${state.user.role})`;
 
+    updateTopbarHeight();
     connectWs();
     await loadInitialData();
 
@@ -1510,7 +1533,9 @@
     $('#menu-admin').addEventListener('click', (e) => { e.preventDefault(); switchView('admin'); $('#user-menu').classList.add('hidden'); });
 
     // Home button - reset to Live Feed with no filters
-    $('#btn-home').addEventListener('click', () => {
+    $('#btn-home').addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
       $('#filter-search').value = '';
       $('#filter-call-type').value = '';
       $('#filter-capcode').value = '';
@@ -1521,7 +1546,14 @@
       switchView('live');
       applyFilters();
       closeSidebar();
+      hideDetail();
+      // Scroll message list to top
+      const list = $('#message-list');
+      if (list) list.scrollTop = 0;
     });
+
+    // Detail backdrop click to close
+    $('#detail-backdrop').addEventListener('click', hideDetail);
 
     // Notifications
     $('#btn-notifications').addEventListener('click', enableNotifications);
@@ -1703,6 +1735,9 @@
   function init() {
     bindEvents();
     registerSW();
+
+    // Keep topbar height CSS variable in sync on resize / orientation change
+    window.addEventListener('resize', updateTopbarHeight);
 
     if (state.token) {
       showApp();
