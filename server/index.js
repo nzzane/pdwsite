@@ -36,6 +36,17 @@ app.use((req, res, next) => {
   next();
 });
 
+// Cache control for service worker and manifest (must always be fresh)
+app.use('/sw.js', (req, res, next) => {
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.set('Service-Worker-Allowed', '/');
+  next();
+});
+app.use('/manifest.json', (req, res, next) => {
+  res.set('Cache-Control', 'no-cache');
+  next();
+});
+
 // Static files (PWA frontend)
 app.use(express.static(path.join(__dirname, '..', 'public')));
 

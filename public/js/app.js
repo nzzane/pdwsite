@@ -899,6 +899,14 @@
               <button class="btn btn-sm btn-danger" id="btn-regenerate-api-key">Regenerate</button>
             </div>
           </div>
+          <div class="settings-section" style="margin-top:1.5rem">
+            <h3 style="margin:0 0 0.5rem 0;font-size:1rem">Push Notifications</h3>
+            <p style="font-size:0.85rem;color:var(--text-dim);margin:0 0 0.75rem 0">
+              Test that push notifications are working. You must first click the bell icon in the top bar to subscribe.
+              Push requires HTTPS (access via your domain, not direct IP).
+            </p>
+            <button class="btn btn-sm btn-primary" id="btn-test-push">Test Push Notification</button>
+          </div>
         `;
         el.querySelector('#btn-copy-api-key').onclick = () => {
           const input = el.querySelector('#settings-api-key');
@@ -1147,45 +1155,90 @@
     };
   }
 
+  // ─── Check if we're on a secure context (HTTPS or localhost) ───
+  function isSecureContext() {
+    return window.isSecureContext ||
+           location.protocol === 'https:' ||
+           location.hostname === 'localhost' ||
+           location.hostname === '127.0.0.1';
+  }
+
   // ─── Push notifications ───
   async function enableNotifications() {
-    if (!('serviceWorker' in navigator)) {
-      toast('Service workers not supported. Try Chrome, Edge, or Firefox.', 'error');
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+
+    // 1. Check secure context (HTTPS required for push)
+    if (!isSecureContext()) {
+      toast('Push notifications require HTTPS. Access via your domain (e.g. pager.turt.dev) instead of IP. In-app alerts still work here.', 'info');
       return;
     }
+
+    // 2. Check service worker support
+    if (!('serviceWorker' in navigator)) {
+      toast('Your browser does not support push notifications. Try Chrome, Edge, or Firefox.', 'error');
+      return;
+    }
+
+    // 3. Check Notification API
     if (!('Notification' in window)) {
-      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
       if (isIOS) {
-        toast('For push: install to Home Screen (Share > Add to Home Screen). In-app alerts with sound work now!', 'info');
+        toast('For push notifications on iOS: tap Share > "Add to Home Screen", then open from there and tap this bell again.', 'info');
       } else {
-        toast('Push not available. In-app alerts with sound still work while the app is open.', 'info');
+        toast('Notifications not available in this browser. In-app alerts with sound still work.', 'info');
       }
       return;
     }
+
+    // 4. Check PushManager
     if (!('PushManager' in window)) {
-      toast('Push not available in this browser. In-app alerts with sound still work while the app is open.', 'info');
+      if (isSafari && !isIOS) {
+        toast('Safari on Mac supports push when added as a web app. Try Chrome for easiest setup, or use Dock > Add to Dock.', 'info');
+      } else if (isIOS) {
+        toast('For push on iOS: tap Share > "Add to Home Screen", then open from there and tap this bell again.', 'info');
+      } else {
+        toast('Push not supported in this browser. Try Chrome or Edge. In-app alerts still work.', 'info');
+      }
       return;
     }
+
+    // 5. Request notification permission
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') {
-      toast('Notification permission denied. Check your browser settings.', 'error');
+      toast('Notification permission denied. Check your browser settings to allow notifications for this site.', 'error');
       return;
     }
+
+    // 6. Ensure service worker is registered and ready
     try {
+      // Register SW if not already
+      let reg = await navigator.serviceWorker.getRegistration('/');
+      if (!reg) {
+        reg = await navigator.serviceWorker.register('/sw.js');
+      }
+      // Wait for it to be ready with a timeout
+      const readyPromise = navigator.serviceWorker.ready;
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Service worker not ready')), 10000)
+      );
+      reg = await Promise.race([readyPromise, timeoutPromise]);
+
+      // 7. Get VAPID key and subscribe
       const { publicKey } = await api('/api/push/vapid-key');
       if (!publicKey) {
-        toast('Push not configured on server (no VAPID keys). In-app alerts still work.', 'error');
+        toast('Push not configured on server (VAPID keys missing). Contact your admin.', 'error');
         return;
       }
-      const reg = await navigator.serviceWorker.ready;
+
       const sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(publicKey),
       });
       await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: sub.toJSON() }) });
-      toast('Push notifications enabled! You will also get in-app alerts with sound.', 'success');
+      toast('Push notifications enabled! You will receive alerts even when the app is closed.', 'success');
     } catch (err) {
-      toast('Push failed: ' + err.message + '. In-app alerts with sound still work while the app is open.', 'error');
+      console.error('Push setup failed:', err);
+      toast('Push setup failed: ' + err.message + '. In-app alerts with sound still work.', 'error');
     }
   }
 
@@ -1413,6 +1466,26 @@
     // Notifications
     $('#btn-notifications').addEventListener('click', enableNotifications);
 
+    // Test push button (if exists - added in admin settings)
+    document.addEventListener('click', async (e) => {
+      if (e.target && e.target.id === 'btn-test-push') {
+        e.target.disabled = true;
+        e.target.textContent = 'Sending...';
+        try {
+          const result = await api('/api/push/test', { method: 'POST' });
+          if (result.sent > 0) {
+            toast(`Test notification sent! (${result.sent} delivered, ${result.failed} failed)`, 'success');
+          } else {
+            toast('All notifications failed: ' + (result.errors || []).join(', '), 'error');
+          }
+        } catch (err) {
+          toast('Test failed: ' + err.message, 'error');
+        }
+        e.target.disabled = false;
+        e.target.textContent = 'Test Push Notification';
+      }
+    });
+
     // Mobile search toggle
     $('#btn-search-toggle').addEventListener('click', () => {
       const bar = $('#search-bar');
@@ -1484,26 +1557,30 @@
 
   // ─── Service worker registration ───
   async function registerSW() {
-    if ('serviceWorker' in navigator) {
-      try {
-        const reg = await navigator.serviceWorker.register('/sw.js');
-        // Check for updates periodically (every 30 min)
-        setInterval(() => reg.update(), 30 * 60 * 1000);
-      } catch (err) {
-        console.warn('SW registration failed:', err);
-      }
+    if (!('serviceWorker' in navigator)) return;
+    // Service workers require a secure context (HTTPS or localhost)
+    if (!isSecureContext()) {
+      console.log('Skipping SW registration: not a secure context (HTTPS required)');
+      return;
+    }
+    try {
+      const reg = await navigator.serviceWorker.register('/sw.js');
+      // Check for updates periodically (every 30 min)
+      setInterval(() => reg.update(), 30 * 60 * 1000);
+    } catch (err) {
+      console.warn('SW registration failed:', err);
     }
   }
 
   // ─── Auto-subscribe to push if permission already granted ───
   async function autoSubscribePush() {
     try {
+      if (!isSecureContext()) return;
       if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
       if (Notification.permission !== 'granted') return;
-      const reg = await navigator.serviceWorker.ready;
+      const reg = await navigator.serviceWorker.getRegistration('/');
+      if (!reg || !reg.active) return;
       const existing = await reg.pushManager.getSubscription();
-      // Re-subscribe to ensure the server has a valid subscription
-      // (handles service worker updates, new VAPID keys, etc.)
       const { publicKey } = await api('/api/push/vapid-key');
       if (!publicKey) return;
       let sub = existing;

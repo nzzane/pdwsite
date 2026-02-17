@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pdw-v2';
+const CACHE_NAME = 'pdw-v3';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -31,8 +31,13 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // Don't cache API requests or WebSocket
-  if (url.pathname.startsWith('/api/') || url.pathname === '/ws') {
+  // Don't handle API requests, WebSocket, or chrome-extension URLs
+  if (url.pathname.startsWith('/api/') || url.pathname === '/ws' || url.protocol === 'chrome-extension:') {
+    return;
+  }
+
+  // Only handle same-origin requests
+  if (url.origin !== self.location.origin) {
     return;
   }
 
@@ -46,7 +51,18 @@ self.addEventListener('fetch', (event) => {
         }
         return response;
       })
-      .catch(() => caches.match(event.request)) // Fall back to cache on network failure
+      .catch(() =>
+        // Fall back to cache on network failure
+        caches.match(event.request).then((cached) => {
+          if (cached) return cached;
+          // For navigation requests, try to serve cached index.html
+          if (event.request.mode === 'navigate') {
+            return caches.match('/index.html');
+          }
+          // Return a proper error response instead of undefined
+          return new Response('Offline', { status: 503, statusText: 'Service Unavailable' });
+        })
+      )
   );
 });
 

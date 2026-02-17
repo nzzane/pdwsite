@@ -429,6 +429,44 @@ router.get('/api/push/vapid-key', (req, res) => {
   res.json({ publicKey: config.VAPID_PUBLIC_KEY });
 });
 
+// Test push notification (sends to current user)
+router.post('/api/push/test', requireAuth, (req, res) => {
+  if (!config.VAPID_PUBLIC_KEY || !config.VAPID_PRIVATE_KEY) {
+    return res.status(400).json({ error: 'VAPID keys not configured. Push notifications are disabled.' });
+  }
+  try {
+    webpush.setVapidDetails(config.VAPID_EMAIL, config.VAPID_PUBLIC_KEY, config.VAPID_PRIVATE_KEY);
+  } catch (err) {
+    return res.status(500).json({ error: 'VAPID configuration error: ' + err.message });
+  }
+  const subs = db.prepare('SELECT endpoint, keys_json FROM push_subscriptions WHERE user_id = ?').all(req.user.id);
+  if (subs.length === 0) {
+    return res.status(400).json({ error: 'No push subscriptions found. Click the bell icon to enable notifications first.' });
+  }
+  const payload = JSON.stringify({
+    title: 'PDW Monitor - Test',
+    body: 'Push notifications are working! You will receive alerts when the app is closed.',
+    data: { test: true },
+  });
+  let sent = 0;
+  let failed = 0;
+  const errors = [];
+  Promise.allSettled(subs.map(sub => {
+    const subscription = { endpoint: sub.endpoint, keys: JSON.parse(sub.keys_json) };
+    return webpush.sendNotification(subscription, payload)
+      .then(() => { sent++; })
+      .catch((err) => {
+        failed++;
+        errors.push(err.statusCode || err.message);
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+        }
+      });
+  })).then(() => {
+    res.json({ sent, failed, errors, total_subscriptions: subs.length });
+  });
+});
+
 // ─── Ingestion endpoint (called by client script) ───
 
 router.post('/api/ingest', requireApiKey, (req, res) => {
