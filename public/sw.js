@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pdw-v6';
+const CACHE_NAME = 'pdw-v7';
 const STATIC_ASSETS = [
   '/',
   '/index.html',

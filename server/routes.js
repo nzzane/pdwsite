@@ -533,6 +533,73 @@ function isJunkFlexFragment(msg) {
   return (msg.content || '').length < FLEX_MIN_CONTENT_LENGTH;
 }
 
+// ─── FLEX/1600 capcode buffer ───
+// Hold FLEX/1600 messages by capcode for 2 seconds to catch Part 2 frames.
+// If Part 2 arrives for the same capcode within 2s, merge or keep the longer version.
+const flexCapcodeBuffer = new Map();
+const FLEX_CAPCODE_BUFFER_MS = 2000; // 2 second hold
+
+function bufferFlexByCapcode(msg) {
+  if (msg.protocol !== 'FLEX' || msg.bitrate !== 1600) return null;
+
+  const key = msg.capcode;
+  let entry = flexCapcodeBuffer.get(key);
+
+  if (!entry) {
+    // First part for this capcode - hold for 2 seconds
+    entry = { msg: { ...msg }, timer: null };
+    flexCapcodeBuffer.set(key, entry);
+    entry.timer = setTimeout(() => {
+      flexCapcodeBuffer.delete(key);
+      processAfterFlexBuffer(entry.msg);
+    }, FLEX_CAPCODE_BUFFER_MS);
+    return { buffered: true };
+  }
+
+  // Second (or subsequent) part arrived for same capcode within 2s
+  clearTimeout(entry.timer);
+
+  const existingContent = (entry.msg.content || '').trim();
+  const newContent = (msg.content || '').trim();
+
+  // Check if contents overlap (one starts like the other = resend, keep longer)
+  const checkLen = Math.min(20, existingContent.length, newContent.length);
+  if (checkLen > 0 &&
+      newContent.substring(0, checkLen) === existingContent.substring(0, checkLen)) {
+    // Overlapping content - keep the longer version
+    if (newContent.length > existingContent.length) {
+      entry.msg = { ...entry.msg, content: newContent };
+    }
+  } else if (newContent.length >= FLEX_MIN_CONTENT_LENGTH) {
+    // Different content - concatenate (true Part 1 + Part 2)
+    entry.msg.content = existingContent + ' ' + newContent;
+  }
+
+  // Release merged message
+  flexCapcodeBuffer.delete(key);
+  processAfterFlexBuffer(entry.msg);
+  return { buffered: true };
+}
+
+/**
+ * Process a FLEX message after it exits the capcode buffer.
+ * Re-cleans content, runs incident dedup, then inserts.
+ */
+function processAfterFlexBuffer(msg) {
+  // Re-clean content in case joining created artifacts
+  msg.content = parser.cleanContent(msg.content);
+
+  // Drop if now too short after cleaning
+  if (isJunkFlexFragment(msg)) return;
+
+  // FLEX incident dedup
+  const incResult = bufferByIncident(msg);
+  if (incResult) return;
+
+  // Direct insert (content dedup check happens inside insertAndBroadcast)
+  insertAndBroadcast(msg);
+}
+
 // Incident-based dedup buffer: collects FLEX messages with the same F-number
 // arriving within a short window, then inserts only the longest version.
 const incidentBuffer = new Map();
@@ -584,6 +651,19 @@ function bufferByIncident(msg) {
  * Returns the inserted message row or null.
  */
 function insertAndBroadcast(msg) {
+  // Content prefix dedup: for FLEX messages, check if a longer/equal message
+  // with the same content prefix already exists (catches cross-capcode fragments)
+  const content = (msg.content || '').trim();
+  if (content.length >= 25 && msg.protocol === 'FLEX') {
+    const prefix = content.substring(0, 25).replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const existingByContent = db.prepare(
+      "SELECT LENGTH(content) as len FROM messages WHERE content LIKE ? ESCAPE '\\' AND received_at > datetime('now', '-120 seconds') ORDER BY LENGTH(content) DESC LIMIT 1"
+    ).get(prefix + '%');
+    if (existingByContent && existingByContent.len >= content.length) {
+      return null; // Already have a better or equal version in DB
+    }
+  }
+
   // Enrich
   const callType = msg.call_type || parser.detectCallType(msg.content);
   const location = msg.location || parser.extractLocation(msg.content);
@@ -688,6 +768,12 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
 
       // Drop tiny FLEX junk fragments (broken frame remnants)
       if (isJunkFlexFragment(msg)) {
+        continue;
+      }
+
+      // FLEX/1600 capcode buffer: hold 2s to catch Part 2 for same capcode
+      const flexResult = bufferFlexByCapcode(msg);
+      if (flexResult) {
         continue;
       }
 
