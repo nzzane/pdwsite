@@ -24,6 +24,10 @@
     searchLimit: 50,
   };
 
+  // ─── Call type categories ───
+  const FIRE_TYPES = ['STRUCTURE FIRE', 'VEGETATION FIRE', 'RUBBISH FIRE', 'VEHICLE FIRE', 'CHIMNEY FIRE', 'RURAL FIRE'];
+  const AMBO_TYPES = ['AMBO', 'CARDIAC', 'BREATHING', 'TRAUMA'];
+
   // ─── Call type colours ───
   const CALL_TYPE_COLOURS = {
     'STRUCTURE FIRE': '#dc2626',
@@ -246,12 +250,25 @@
     let metaHtml = '';
     if (msg.location) metaHtml += `<span class="msg-meta-item">&#x1f4cd; ${esc(msg.location)}</span>`;
 
+    // Fire/Ambo type icon
+    let typeIconHtml = '';
+    if (msg.call_type) {
+      if (FIRE_TYPES.includes(msg.call_type)) {
+        typeIconHtml = `<div class="msg-type-icon msg-type-fire"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5A2.5 2.5 0 0011 12c0-1.38-.5-2-1-3-1.07-2.14-.22-4.05 2-6 .5 2.5 2 4.9 4 6.5 2 1.6 3 3.5 3 5.5a7 7 0 11-14 0c0-1.15.43-2.29 1-3a2.5 2.5 0 002.5 2.5z"/></svg></div>`;
+        card.classList.add('has-type-icon');
+      } else if (AMBO_TYPES.includes(msg.call_type)) {
+        typeIconHtml = `<div class="msg-type-icon msg-type-ambo"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 6v12"/><path d="M6 12h12"/><circle cx="12" cy="12" r="10"/></svg></div>`;
+        card.classList.add('has-type-icon');
+      }
+    }
+
     card.innerHTML = `
       <div class="msg-header">${headerHtml}</div>
       ${trucksHtml}
       <div class="msg-content">${esc(displayContent)}</div>
       ${metaHtml ? `<div class="msg-meta">${metaHtml}</div>` : ''}
       ${incidentHtml}
+      ${typeIconHtml}
     `;
 
     // Click handlers
@@ -1236,6 +1253,7 @@
       });
       await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: sub.toJSON() }) });
       toast('Push notifications enabled! You will receive alerts even when the app is closed.', 'success');
+      updateNotificationBell();
     } catch (err) {
       console.error('Push setup failed:', err);
       toast('Push setup failed: ' + err.message + '. In-app alerts with sound still work.', 'error');
@@ -1343,6 +1361,7 @@
 
     // Auto-subscribe to push if permission already granted (ensures background notifications work)
     autoSubscribePush();
+    updateNotificationBell();
 
     // Show first-login disclaimer if not yet accepted
     if (!localStorage.getItem('pdw_disclaimer_accepted')) {
@@ -1463,6 +1482,20 @@
     $('#menu-change-pw').addEventListener('click', (e) => { e.preventDefault(); showChangePasswordModal(); });
     $('#menu-admin').addEventListener('click', (e) => { e.preventDefault(); switchView('admin'); $('#user-menu').classList.add('hidden'); });
 
+    // Home button - reset to Live Feed with no filters
+    $('#btn-home').addEventListener('click', () => {
+      $('#filter-search').value = '';
+      $('#filter-call-type').value = '';
+      $('#filter-capcode').value = '';
+      $('#filter-location').value = '';
+      $('#filter-trucks').value = '';
+      $('#filter-group').value = '';
+      $('#filter-hide-test').checked = true;
+      switchView('live');
+      applyFilters();
+      closeSidebar();
+    });
+
     // Notifications
     $('#btn-notifications').addEventListener('click', enableNotifications);
 
@@ -1570,6 +1603,30 @@
     } catch (err) {
       console.warn('SW registration failed:', err);
     }
+  }
+
+  // ─── Update notification bell icon to show active state ───
+  async function updateNotificationBell() {
+    try {
+      const bell = $('#btn-notifications');
+      if (!bell) return;
+      if (!isSecureContext() || !('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+      if (Notification.permission !== 'granted') {
+        bell.classList.remove('notifications-active');
+        bell.title = 'Enable notifications';
+        return;
+      }
+      const reg = await navigator.serviceWorker.getRegistration('/');
+      if (!reg) return;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) {
+        bell.classList.add('notifications-active');
+        bell.title = 'Notifications enabled';
+      } else {
+        bell.classList.remove('notifications-active');
+        bell.title = 'Enable notifications';
+      }
+    } catch { /* ignore */ }
   }
 
   // ─── Auto-subscribe to push if permission already granted ───
