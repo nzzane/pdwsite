@@ -25,7 +25,4 @@ module.exports = {
 
   // Multipart message join timeout (ms) - how long to wait for remaining parts
   MULTIPART_TIMEOUT_MS: parseInt(process.env.MULTIPART_TIMEOUT_MS || '10000', 10),
-
-  // Max messages to keep in DB (0 = unlimited)
-  MAX_MESSAGES: parseInt(process.env.MAX_MESSAGES || '0', 10),
 };

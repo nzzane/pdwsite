@@ -22,7 +22,7 @@ router.get('/api/health', (req, res) => {
     res.json({
       status: 'ok',
       uptime: Math.floor(process.uptime()),
-      memory: Math.round(process.memoryUsage.rss() / 1024 / 1024),
+      memory: Math.round(process.memoryUsage().rss / 1024 / 1024),
       db: 'ok',
       users: row.count,
       wsClients,
@@ -158,7 +158,7 @@ router.get('/api/messages', requireAuth, (req, res) => {
   }
 
   sql += ' ORDER BY m.received_at DESC LIMIT ? OFFSET ?';
-  params.push(parseInt(limit, 10), parseInt(offset, 10));
+  params.push(Math.min(parseInt(limit, 10) || 100, 500), parseInt(offset, 10) || 0);
 
   const messages = db.prepare(sql).all(...params);
   res.json(messages);

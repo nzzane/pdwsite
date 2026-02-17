@@ -6,12 +6,32 @@ const jwt = require('jsonwebtoken');
 const config = require('./config');
 const { router, setBroadcast } = require('./routes');
 
+// ─── Uncaught error handlers (ensures docker logs captures crashes) ───
+process.on('uncaughtException', (err) => {
+  console.error('UNCAUGHT EXCEPTION:', err.stack || err.message || err);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('UNHANDLED REJECTION:', reason);
+});
+
 const app = express();
 const server = http.createServer(app);
 
 // Middleware
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
+
+// Request logging (stdout for docker logs)
+app.use((req, res, next) => {
+  if (req.path === '/api/health') return next(); // Don't log health checks
+  const start = Date.now();
+  res.on('finish', () => {
+    const ms = Date.now() - start;
+    console.log(`${req.method} ${req.path} ${res.statusCode} ${ms}ms`);
+  });
+  next();
+});
 
 // Static files (PWA frontend)
 app.use(express.static(path.join(__dirname, '..', 'public')));
@@ -29,12 +49,19 @@ app.get('*', (req, res) => {
 // ─── WebSocket server ───
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-// Track authenticated clients
+// Track authenticated clients (only authenticated clients are in this map)
 const clients = new Map();
 
 wss.on('connection', (ws, req) => {
   let authenticated = false;
   let userId = null;
+
+  // Auto-close unauthenticated connections after 15s
+  const authTimeout = setTimeout(() => {
+    if (!authenticated) {
+      ws.close(4001, 'Authentication timeout');
+    }
+  }, 15000);
 
   ws.on('message', (data) => {
     try {
@@ -46,9 +73,11 @@ wss.on('connection', (ws, req) => {
           const payload = jwt.verify(msg.token, config.JWT_SECRET);
           authenticated = true;
           userId = payload.id;
+          clearTimeout(authTimeout);
           clients.set(ws, { userId, username: payload.username, role: payload.role });
           updateClientCount();
           ws.send(JSON.stringify({ type: 'auth', status: 'ok' }));
+          console.log(`WS authenticated: ${payload.username} (${clients.size} clients)`);
         } catch {
           ws.send(JSON.stringify({ type: 'auth', status: 'error', error: 'Invalid token' }));
         }
@@ -66,8 +95,13 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    clearTimeout(authTimeout);
     clients.delete(ws);
     updateClientCount();
+  });
+
+  ws.on('error', (err) => {
+    console.error('WS error:', err.message);
   });
 
   // Send initial connection ack
@@ -78,7 +112,7 @@ wss.on('connection', (ws, req) => {
 app.set('wsClientCount', 0);
 const updateClientCount = () => app.set('wsClientCount', clients.size);
 
-// Broadcast function for routes to use
+// Broadcast function for routes to use (only sends to authenticated clients)
 setBroadcast((message) => {
   const payload = JSON.stringify(message);
   for (const [ws, info] of clients) {
@@ -90,10 +124,14 @@ setBroadcast((message) => {
 
 // Heartbeat to detect stale connections
 const heartbeat = setInterval(() => {
-  wss.clients.forEach((ws) => {
-    if (ws.readyState !== 1) return;
+  for (const [ws, info] of clients) {
+    if (ws.readyState !== 1) {
+      clients.delete(ws);
+      updateClientCount();
+      return;
+    }
     ws.send(JSON.stringify({ type: 'heartbeat', time: Date.now() }));
-  });
+  }
 }, 30000);
 
 wss.on('close', () => clearInterval(heartbeat));
@@ -120,7 +158,7 @@ function shutdown(signal) {
   // Close all WebSocket connections
   clearInterval(heartbeat);
   wss.clients.forEach((ws) => {
-    ws.send(JSON.stringify({ type: 'shutdown' }));
+    try { ws.send(JSON.stringify({ type: 'shutdown' })); } catch { /* ignore */ }
     ws.close(1001, 'Server shutting down');
   });
   wss.close(() => {

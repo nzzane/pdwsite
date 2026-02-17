@@ -28,7 +28,6 @@ services:
       # ── Tuning ──
       - DEDUP_WINDOW_MS=${DEDUP_WINDOW_MS:-30000}
       - MULTIPART_TIMEOUT_MS=${MULTIPART_TIMEOUT_MS:-10000}
-      - MAX_MESSAGES=${MAX_MESSAGES:-0}
       - NODE_ENV=production
 
     # Health check (mirrors Dockerfile HEALTHCHECK but compose-level gives

@@ -7,27 +7,26 @@ echo "Port: ${PORT:-3000}"
 
 # Auto-create admin account on first run if ADMIN_PASSWORD is set
 if [ -n "$ADMIN_PASSWORD" ]; then
-  # Check if any admin user exists
-  if ! node -e "
+  node -e "
+    const bcrypt = require('bcrypt');
     const db = require('./server/db');
     const row = db.prepare(\"SELECT id FROM users WHERE role = 'admin'\").get();
-    if (row) process.exit(0);
-    process.exit(1);
-  " 2>/dev/null; then
-    echo "Creating admin account (username: ${ADMIN_USERNAME:-admin})..."
-    node -e "
-      const bcrypt = require('bcrypt');
-      const db = require('./server/db');
-      const username = process.env.ADMIN_USERNAME || 'admin';
-      const password = process.env.ADMIN_PASSWORD;
-      bcrypt.hash(password, 12).then(hash => {
-        db.prepare('INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)').run(username, hash, 'admin');
-        console.log('Admin account created: ' + username);
-      });
-    "
-  else
-    echo "Admin account already exists, skipping creation."
-  fi
+    if (row) {
+      console.log('Admin account already exists, skipping creation.');
+      db.close();
+      process.exit(0);
+    }
+    const username = process.env.ADMIN_USERNAME || 'admin';
+    const password = process.env.ADMIN_PASSWORD;
+    bcrypt.hash(password, 12).then(hash => {
+      db.prepare('INSERT OR IGNORE INTO users (username, password_hash, role) VALUES (?, ?, ?)').run(username, hash, 'admin');
+      console.log('Admin account created: ' + username);
+      db.close();
+    }).catch(err => {
+      console.error('Failed to create admin:', err.message);
+      process.exit(1);
+    });
+  "
 fi
 
 # Generate VAPID keys automatically if not provided
