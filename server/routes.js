@@ -13,6 +13,26 @@ function setBroadcast(fn) {
   broadcast = fn;
 }
 
+// ─── Health check (unauthenticated - used by Docker HEALTHCHECK) ───
+router.get('/api/health', (req, res) => {
+  try {
+    // Verify DB is accessible
+    const row = db.prepare("SELECT COUNT(*) as count FROM users").get();
+    const wsClients = req.app.get('wsClientCount') || 0;
+    res.json({
+      status: 'ok',
+      uptime: Math.floor(process.uptime()),
+      memory: Math.round(process.memoryUsage.rss() / 1024 / 1024),
+      db: 'ok',
+      users: row.count,
+      wsClients,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(503).json({ status: 'error', error: err.message });
+  }
+});
+
 // ─── Auth routes ───
 
 router.post('/api/auth/login', async (req, res) => {

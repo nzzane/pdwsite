@@ -1,0 +1,72 @@
+services:
+  pdw-monitor:
+    build: .
+    container_name: pdw-monitor
+    restart: unless-stopped
+
+    ports:
+      - "${PDW_PORT:-3000}:3000"
+
+    volumes:
+      # Persistent storage for SQLite DB, VAPID keys, etc.
+      - pdw-data:/data
+
+    environment:
+      # ── Required ──
+      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
+      - API_KEY=${API_KEY:?Set API_KEY in .env}
+
+      # ── Auto admin setup (first run only) ──
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+
+      # ── Push notifications (auto-generated if not set) ──
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
+      - VAPID_EMAIL=${VAPID_EMAIL:-mailto:admin@example.com}
+
+      # ── Tuning ──
+      - DEDUP_WINDOW_MS=${DEDUP_WINDOW_MS:-30000}
+      - MULTIPART_TIMEOUT_MS=${MULTIPART_TIMEOUT_MS:-10000}
+      - MAX_MESSAGES=${MAX_MESSAGES:-0}
+      - NODE_ENV=production
+
+    # Health check (mirrors Dockerfile HEALTHCHECK but compose-level gives
+    # more control for orchestration / depends_on with condition)
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # ── Resource limits - prevent runaway memory ──
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
+
+    # ── Security hardening ──
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      # Node needs a writable /tmp for some operations
+      - /tmp:size=64M
+
+    # Graceful shutdown - match the 10s timeout in server code
+    stop_grace_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pdw-data:
+    driver: local

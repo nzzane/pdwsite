@@ -102,6 +102,82 @@ rtl_fm -f 157.925M -g 40 -s 22050 - | multimon-ng -t raw -a POCSAG512 -a POCSAG1
   API_KEY=your-key SERVER_URL=http://your-server:3000 READ_STDIN=1 node client/pdw-client.js
 ```
 
+## Docker Deployment (Recommended)
+
+The easiest way to run the server. Docker handles health checks, automatic restarts, resource limits, and data persistence.
+
+### Quick start
+
+```bash
+# Create your .env file
+cat > .env << 'EOF'
+JWT_SECRET=change-me-to-a-long-random-string
+API_KEY=change-me-shared-secret-for-client
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=changeme
+EOF
+
+# Start the server
+docker compose up -d
+```
+
+That's it. The container will:
+- Auto-create the admin account on first boot
+- Auto-generate VAPID keys for push notifications (persisted to the data volume)
+- Restart automatically if it crashes or the host reboots
+- Health-check itself every 30 seconds and self-heal if unresponsive
+- Persist the database and keys in a named Docker volume (`pdw-data`)
+
+### Management commands
+
+```bash
+# View logs
+docker compose logs -f pdw-monitor
+
+# Check health status
+docker compose ps
+curl http://localhost:3000/api/health
+
+# Restart
+docker compose restart
+
+# Stop
+docker compose down
+
+# Stop and remove data volume (DESTRUCTIVE - deletes all messages and accounts)
+docker compose down -v
+
+# Rebuild after code changes
+docker compose up -d --build
+```
+
+### Custom port
+
+```bash
+PDW_PORT=8080 docker compose up -d
+```
+
+### What Docker provides
+
+| Feature | Detail |
+|---------|--------|
+| **Self-healing** | `restart: unless-stopped` + health checks = auto-restart on crash |
+| **Health checks** | Hits `/api/health` every 30s, restarts after 3 consecutive failures |
+| **Graceful shutdown** | Tini as PID 1, SIGTERM handling, 15s drain period |
+| **Data persistence** | SQLite DB + VAPID keys stored in `pdw-data` Docker volume |
+| **Resource limits** | Capped at 512MB RAM / 1 CPU to prevent runaway usage |
+| **Security hardening** | Read-only filesystem, no-new-privileges, non-root user |
+| **Log rotation** | JSON log driver capped at 3x10MB files |
+| **Signal handling** | Tini init reaps zombie processes and forwards signals |
+
+### Client script connection
+
+On the RTL-SDR machine (does NOT run in Docker - needs hardware access):
+
+```bash
+API_KEY=your-api-key SERVER_URL=http://docker-host:3000 node client/pdw-client.js
+```
+
 ## Mobile Installation (PWA)
 
 ### Android
@@ -157,3 +233,4 @@ All API endpoints require authentication via `Authorization: Bearer <token>` hea
 | GET | `/api/favourites` | List user favourites |
 | POST | `/api/favourites/:groupId` | Add favourite |
 | POST | `/api/ingest` | Ingest messages (API key auth) |
+| GET | `/api/health` | Health check (no auth, used by Docker) |

@@ -47,6 +47,7 @@ wss.on('connection', (ws, req) => {
           authenticated = true;
           userId = payload.id;
           clients.set(ws, { userId, username: payload.username, role: payload.role });
+          updateClientCount();
           ws.send(JSON.stringify({ type: 'auth', status: 'ok' }));
         } catch {
           ws.send(JSON.stringify({ type: 'auth', status: 'error', error: 'Invalid token' }));
@@ -66,11 +67,16 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     clients.delete(ws);
+    updateClientCount();
   });
 
   // Send initial connection ack
   ws.send(JSON.stringify({ type: 'connected' }));
 });
+
+// Expose WS client count to routes (for health check)
+app.set('wsClientCount', 0);
+const updateClientCount = () => app.set('wsClientCount', clients.size);
 
 // Broadcast function for routes to use
 setBroadcast((message) => {
@@ -101,3 +107,42 @@ server.listen(config.PORT, config.HOST, () => {
     console.log('Run: npm run generate-vapid');
   }
 });
+
+// ─── Graceful shutdown ───
+function shutdown(signal) {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+
+  // Stop accepting new connections
+  server.close(() => {
+    console.log('HTTP server closed.');
+  });
+
+  // Close all WebSocket connections
+  clearInterval(heartbeat);
+  wss.clients.forEach((ws) => {
+    ws.send(JSON.stringify({ type: 'shutdown' }));
+    ws.close(1001, 'Server shutting down');
+  });
+  wss.close(() => {
+    console.log('WebSocket server closed.');
+  });
+
+  // Close database
+  try {
+    const db = require('./db');
+    db.close();
+    console.log('Database closed.');
+  } catch { /* already closed */ }
+
+  // Force exit after timeout
+  setTimeout(() => {
+    console.log('Forcing exit after timeout.');
+    process.exit(1);
+  }, 10000).unref();
+
+  // Normal exit once connections drain
+  setTimeout(() => process.exit(0), 500);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
