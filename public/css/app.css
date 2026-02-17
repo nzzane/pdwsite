@@ -45,8 +45,10 @@ a:hover { text-decoration: underline; }
   position: fixed;
   top: 0;
   left: 0;
-  right: 0;
-  bottom: 0;
+  width: 100%;
+  height: var(--app-height, 100vh);
+  height: var(--app-height, 100dvh);
+  overflow: hidden;
 }
 
 /* ─── Login ─── */
@@ -198,7 +200,7 @@ a:hover { text-decoration: underline; }
 
 /* ─── Sidebar ─── */
 .sidebar {
-  position: fixed;
+  position: absolute;
   top: var(--topbar-actual-h, calc(var(--topbar-h) + var(--safe-top)));
   left: 0;
   bottom: 0;
@@ -213,7 +215,7 @@ a:hover { text-decoration: underline; }
 }
 .sidebar.open { transform: translateX(0); }
 .sidebar-overlay {
-  position: fixed;
+  position: absolute;
   top: var(--topbar-actual-h, calc(var(--topbar-h) + var(--safe-top)));
   left: 0;
   right: 0;
@@ -464,6 +466,16 @@ a:hover { text-decoration: underline; }
   font-family: monospace;
 }
 
+/* Status/CAD messages (unit assignments, timing) - faded appearance */
+.msg-card.msg-status {
+  opacity: 0.45;
+  border-left-color: var(--border) !important;
+}
+.msg-card.msg-status:hover { opacity: 0.7; }
+
+/* Hidden capcode messages (should not normally appear, safety net) */
+.msg-card.msg-hidden { display: none; }
+
 /* Fire/Ambo type icon overlay on message cards */
 .msg-type-icon {
   position: absolute;
@@ -495,7 +507,7 @@ a:hover { text-decoration: underline; }
   left: 0;
   right: 0;
   max-height: 70vh;
-  background: var(--bg);
+  background: #1a2742;
   border-top: 3px solid var(--primary);
   border-radius: var(--radius) var(--radius) 0 0;
   z-index: 150;
@@ -503,7 +515,7 @@ a:hover { text-decoration: underline; }
   transition: transform 0.25s ease;
   overflow-y: auto;
   padding-bottom: var(--safe-bottom);
-  box-shadow: 0 -8px 32px rgba(0,0,0,0.5);
+  box-shadow: 0 -8px 32px rgba(0,0,0,0.6);
 }
 .detail-panel.visible { transform: translateY(0); }
 .detail-header {
@@ -514,7 +526,7 @@ a:hover { text-decoration: underline; }
   border-bottom: 1px solid var(--border);
   position: sticky;
   top: 0;
-  background: var(--bg);
+  background: #1a2742;
 }
 .detail-content { padding: 1rem; }
 .detail-row { margin-bottom: 0.75rem; }

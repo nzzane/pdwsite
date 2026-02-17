@@ -165,12 +165,23 @@
     let matched = false;
     let matchReason = '';
 
-    // Check favourited groups
+    // Check favourited groups (capcodes + keywords)
     for (const fav of state.favourites) {
       const group = state.groups.find(g => g.id === fav.group_id);
-      if (group && group.members) {
+      if (!group) continue;
+      // Check capcode members
+      if (group.members) {
         const caps = group.members.map(m => normalizeCapcode(m.capcode));
         if (caps.includes(normCap)) {
+          matched = true;
+          matchReason = fav.group_name;
+          break;
+        }
+      }
+      // Check group keywords
+      if (group.keywords && group.keywords.length > 0) {
+        const content = (msg.content || '').toLowerCase();
+        if (group.keywords.some(kw => content.includes(kw.keyword.toLowerCase()))) {
           matched = true;
           matchReason = fav.group_name;
           break;
@@ -226,14 +237,22 @@
   // ─── Render a message card ───
   function renderMessageCard(msg) {
     const colour = msg.call_type ? (CALL_TYPE_COLOURS[msg.call_type] || '#6b7280') : (msg.alias_colour || '#6b7280');
-    const aliasObj = state.aliases[msg.capcode];
+    const normCap = normalizeCapcode(msg.capcode);
+    const aliasObj = state.aliases[normCap] || state.aliases[msg.capcode];
     const aliasName = msg.alias || (aliasObj ? aliasObj.alias : null);
     const aliasColour = aliasObj ? aliasObj.colour : (msg.alias_colour || colour);
     const aliasNotes = msg.alias_notes || (aliasObj ? aliasObj.notes : null);
     const isAdmin = state.user && state.user.role === 'admin';
 
+    // Check if this capcode is hidden
+    const isHidden = aliasObj && aliasObj.hidden;
+    // Check if this is a status/CAD message
+    const isStatus = isStatusMessage(msg.content);
+
     const card = document.createElement('div');
     card.className = 'msg-card highlight';
+    if (isHidden) card.classList.add('msg-hidden');
+    if (isStatus) card.classList.add('msg-status');
     card.style.borderLeftColor = colour;
     card.dataset.id = msg.id;
 
@@ -267,9 +286,11 @@
       incidentHtml = `<div class="msg-incident"><a href="https://sitrep.fireandemergency.nz/report/${esc(incidentNum)}" target="_blank" rel="noopener" class="incident-link">${esc(incidentNum)}</a></div>`;
     }
 
-    // Location
+    // Location + time of call
     let metaHtml = '';
     if (msg.location) metaHtml += `<span class="msg-meta-item">&#x1f4cd; ${esc(msg.location)}</span>`;
+    // Show formatted time next to location
+    metaHtml += `<span class="msg-meta-item">&#x1f552; ${formatTime(msg.received_at)}</span>`;
 
     // Fire/Ambo type icon
     let typeIconHtml = '';
@@ -320,6 +341,25 @@
     if (topbar) {
       document.documentElement.style.setProperty('--topbar-actual-h', topbar.offsetHeight + 'px');
     }
+  }
+
+  // ─── Measure actual viewport height for iOS Safari ───
+  function updateAppHeight() {
+    document.documentElement.style.setProperty('--app-height', window.innerHeight + 'px');
+  }
+
+  // ─── Detect CAD status/timing messages that should be greyed out ───
+  function isStatusMessage(content) {
+    if (!content) return false;
+    // "Unit: MALB1 Assigned to Station: Picton"
+    if (/\bUnit:\s*\S+\s+Assigned to Station:/i.test(content)) return true;
+    // "CHR2 Ref:0115-3-2026/02/18 Disp:06:13Resp:06:14Loc:06:31Dep:07:11Dest:07:45"
+    if (/Ref:\S+\s*Disp:\S+\s*Resp:/i.test(content)) return true;
+    // "Assigned to Station:" without Unit prefix
+    if (/\bAssigned to Station:/i.test(content)) return true;
+    // Status messages like "Enroute", "On Scene", "Available"
+    if (/^\s*(Enroute|On Scene|Available|At Station|Responding|Returning)\s*$/i.test(content)) return true;
+    return false;
   }
 
   function showDetail(msg) {
@@ -445,10 +485,16 @@
       statusDot.classList.add('data-flash');
     }
 
-    // Check in-app alerts even if paused (Safari fallback for push)
-    checkInAppAlert(msg);
+    // Skip hidden capcodes (from server broadcast flag or local alias)
+    const normCap = normalizeCapcode(msg.capcode);
+    const aliasObj = state.aliases[normCap] || state.aliases[msg.capcode];
+    const isHidden = msg.hidden || (aliasObj && aliasObj.hidden);
+
+    // Check in-app alerts even if paused (Safari fallback for push), but not for hidden
+    if (!isHidden) checkInAppAlert(msg);
 
     if (state.paused) return;
+    if (isHidden) return; // Don't show hidden messages in live feed
 
     // Check if message passes current filters
     if (!matchesFilters(msg)) return;
@@ -486,9 +532,19 @@
     if (trucks && !(msg.trucks || '').toLowerCase().includes(trucks)) return false;
     if (groupId) {
       const group = state.groups.find(g => g.id === parseInt(groupId, 10));
-      if (group && group.members) {
-        const caps = group.members.map(m => m.capcode);
-        if (!caps.includes(msg.capcode)) return false;
+      if (group) {
+        let matchesGroup = false;
+        // Check capcode members
+        if (group.members) {
+          const caps = group.members.map(m => normalizeCapcode(m.capcode));
+          if (caps.includes(normalizeCapcode(msg.capcode))) matchesGroup = true;
+        }
+        // Check keywords
+        if (!matchesGroup && group.keywords && group.keywords.length > 0) {
+          const content = (msg.content || '').toLowerCase();
+          matchesGroup = group.keywords.some(kw => content.includes(kw.keyword.toLowerCase()));
+        }
+        if (!matchesGroup) return false;
       }
     }
     return true;
@@ -524,11 +580,12 @@
         state.aliases[a.capcode] = a;
       }
 
-      // Load group members for in-app alert matching
+      // Load group members and keywords for in-app alert matching
       for (const g of state.groups) {
         try {
           const detail = await api(`/api/groups/${g.id}`);
           g.members = detail.members || [];
+          g.keywords = detail.keywords || [];
         } catch { /* ignore */ }
       }
 
@@ -823,7 +880,7 @@
         el.innerHTML = `
           <div style="margin-bottom:0.75rem"><button class="btn btn-primary btn-sm" id="btn-add-group">Add Group</button></div>
           <table class="admin-table">
-            <thead><tr><th>Name</th><th>Colour</th><th>Members</th><th>Fav</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Name</th><th>Colour</th><th>Members</th><th>Keywords</th><th>Fav</th><th>Actions</th></tr></thead>
             <tbody>
               ${groups.map(g => {
                 const isFav = state.favourites.some(f => f.group_id === g.id);
@@ -832,6 +889,7 @@
                   <td>${esc(g.name)}</td>
                   <td><span class="colour-dot" style="background:${esc(g.colour)}"></span>${esc(g.colour)}</td>
                   <td>${g.member_count || 0}</td>
+                  <td>${g.keyword_count || 0}</td>
                   <td><button class="fav-star ${isFav ? 'active' : ''}" data-fav-group="${g.id}" title="${isFav ? 'Remove from favourites' : 'Add to favourites'}">${isFav ? '\u2605' : '\u2606'}</button></td>
                   <td class="admin-actions">
                     <button class="btn btn-sm" data-edit-group="${g.id}">Edit</button>
@@ -870,15 +928,16 @@
         el.innerHTML = `
           <div style="margin-bottom:0.75rem"><button class="btn btn-primary btn-sm" id="btn-add-alias">Add Alias</button></div>
           <table class="admin-table">
-            <thead><tr><th>Capcode</th><th>Alias</th><th>Colour</th><th>Call Type</th><th>Location</th><th>Actions</th></tr></thead>
+            <thead><tr><th>Capcode</th><th>Alias</th><th>Colour</th><th>Call Type</th><th>Location</th><th>Hidden</th><th>Actions</th></tr></thead>
             <tbody>
               ${aliases.map(a => `
-                <tr>
+                <tr${a.hidden ? ' style="opacity:0.5"' : ''}>
                   <td class="mono">${esc(a.capcode)}</td>
                   <td>${esc(a.alias)}</td>
                   <td><span class="colour-dot" style="background:${esc(a.colour)}"></span></td>
                   <td>${esc(a.call_type || '')}</td>
                   <td>${esc(a.location || '')}</td>
+                  <td>${a.hidden ? 'Yes' : ''}</td>
                   <td class="admin-actions">
                     <button class="btn btn-sm" data-edit-alias="${esc(a.capcode)}">Edit</button>
                     <button class="btn btn-sm btn-danger" data-delete-alias="${esc(a.capcode)}">Delete</button>
@@ -1015,15 +1074,18 @@
   async function showGroupModal(editId) {
     let group = null;
     let members = [];
+    let keywords = [];
     if (editId) {
       group = await api(`/api/groups/${editId}`);
       members = group.members || [];
+      keywords = group.keywords || [];
     }
     showModal(editId ? 'Edit Group' : 'Add Group', `
       <div class="form-group"><label>Name</label><input type="text" id="group-name" value="${esc(group ? group.name : '')}"></div>
       <div class="form-group"><label>Description</label><textarea id="group-desc">${esc(group ? group.description : '')}</textarea></div>
       <div class="form-group"><label>Colour</label><input type="color" id="group-colour" value="${group ? group.colour : '#3b82f6'}" style="width:60px;height:32px;padding:2px"></div>
-      <div class="form-group"><label>Capcodes (one per line)</label><textarea id="group-capcodes" rows="6" placeholder="1234567\n7654321">${members.map(m => m.capcode).join('\n')}</textarea></div>
+      <div class="form-group"><label>Capcodes (one per line)</label><textarea id="group-capcodes" rows="5" placeholder="1234567\n7654321">${members.map(m => m.capcode).join('\n')}</textarea></div>
+      <div class="form-group"><label>Keywords (one per line) — match messages containing these words (e.g. suburb names)</label><textarea id="group-keywords" rows="4" placeholder="Picton\nBlenheim\nWairau Valley">${keywords.map(k => k.keyword).join('\n')}</textarea></div>
     `, `
       <button class="btn" id="modal-cancel">Cancel</button>
       <button class="btn btn-primary" id="modal-save">Save</button>
@@ -1034,15 +1096,18 @@
       const description = $('#group-desc').value.trim();
       const colour = $('#group-colour').value;
       const capcodes = $('#group-capcodes').value.split('\n').map(c => c.trim()).filter(Boolean);
+      const kwList = $('#group-keywords').value.split('\n').map(k => k.trim()).filter(Boolean);
       if (!name) return toast('Name required', 'error');
       try {
+        const body = { name, description, colour, capcodes, keywords: kwList };
         if (editId) {
-          await api(`/api/groups/${editId}`, { method: 'PUT', body: JSON.stringify({ name, description, colour, capcodes }) });
+          await api(`/api/groups/${editId}`, { method: 'PUT', body: JSON.stringify(body) });
         } else {
-          await api('/api/groups', { method: 'POST', body: JSON.stringify({ name, description, colour, capcodes }) });
+          await api('/api/groups', { method: 'POST', body: JSON.stringify(body) });
         }
         hideModal();
-        loadAdminTab('groups');
+        await loadInitialData();
+        if (state.currentView === 'admin') loadAdminTab('groups');
         renderFilterOptions();
         toast('Group saved', 'success');
       } catch (err) {
@@ -1066,6 +1131,8 @@
       return `<label class="checkbox-label"><input type="checkbox" value="${g.id}" class="alias-group-cb" ${checked}> <span class="colour-dot" style="background:${esc(g.colour)}"></span>${esc(g.name)}</label>`;
     }).join('');
 
+    const hiddenChecked = alias && alias.hidden ? 'checked' : '';
+
     showModal(editCapcode && alias ? 'Edit Alias' : (editCapcode ? 'Add Alias for ' + editCapcode : 'Add Alias'), `
       <div class="form-group"><label>Capcode</label><input type="text" id="alias-capcode" value="${esc(editCapcode || (alias ? alias.capcode : ''))}" ${editCapcode ? 'readonly' : ''}></div>
       <div class="form-group"><label>Alias Name (e.g. truck/unit name)</label><input type="text" id="alias-name" value="${esc(alias ? alias.alias : '')}" placeholder="e.g. MATAFRU, TAUP217"></div>
@@ -1073,6 +1140,7 @@
       <div class="form-group"><label>Colour</label><input type="color" id="alias-colour" value="${alias ? alias.colour : '#6b7280'}" style="width:60px;height:32px;padding:2px"></div>
       <div class="form-group"><label>Default Call Type</label><input type="text" id="alias-calltype" value="${esc(alias ? alias.call_type || '' : '')}" placeholder="e.g. AMBO, MIN"></div>
       <div class="form-group"><label>Default Location</label><input type="text" id="alias-location" value="${esc(alias ? alias.location || '' : '')}" placeholder="e.g. Wellington"></div>
+      <div class="form-group"><label class="checkbox-label"><input type="checkbox" id="alias-hidden" ${hiddenChecked}> Hidden — hide all messages from this capcode (filter out junk/unrelated pages)</label></div>
       <div class="form-group"><label>Groups</label><div class="checkbox-group">${groupCheckboxes || '<span style="color:var(--text-muted);font-size:0.8rem">No groups created yet</span>'}</div></div>
     `, `
       <button class="btn" id="modal-cancel">Cancel</button>
@@ -1098,6 +1166,7 @@
             call_type: $('#alias-calltype').value.trim() || null,
             location: $('#alias-location').value.trim() || null,
             group_ids: groupIds,
+            hidden: $('#alias-hidden').checked,
           })
         });
         // Refresh aliases in state
@@ -1405,6 +1474,7 @@
     $('#app-screen').classList.add('active');
     $('#user-info').textContent = `${state.user.username} (${state.user.role})`;
 
+    updateAppHeight();
     updateTopbarHeight();
     connectWs();
     await loadInitialData();
@@ -1532,24 +1602,31 @@
     $('#menu-change-pw').addEventListener('click', (e) => { e.preventDefault(); showChangePasswordModal(); });
     $('#menu-admin').addEventListener('click', (e) => { e.preventDefault(); switchView('admin'); $('#user-menu').classList.add('hidden'); });
 
-    // Home button - reset to Live Feed with no filters
+    // Home button - reset to Live Feed with no filters, force reload messages
     $('#btn-home').addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
+      // Clear all filters
       $('#filter-search').value = '';
       $('#filter-call-type').value = '';
       $('#filter-capcode').value = '';
       $('#filter-location').value = '';
       $('#filter-trucks').value = '';
       $('#filter-group').value = '';
-      $('#filter-hide-test').checked = true;
-      switchView('live');
-      applyFilters();
+      if ($('#filter-hide-test')) $('#filter-hide-test').checked = true;
+      // Switch view to live (won't re-fetch if already on live)
+      state.currentView = 'live';
+      $$('.view').forEach(v => v.classList.remove('active'));
+      $('#view-live').classList.add('active');
+      $$('.nav-item[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === 'live'));
+      // Close panels
       closeSidebar();
       hideDetail();
-      // Scroll message list to top
-      const list = $('#message-list');
-      if (list) list.scrollTop = 0;
+      // Un-pause if paused
+      state.paused = false;
+      $('#btn-pause').textContent = 'Pause';
+      // Force reload messages from API
+      loadRecentMessages();
     });
 
     // Detail backdrop click to close
@@ -1736,8 +1813,11 @@
     bindEvents();
     registerSW();
 
-    // Keep topbar height CSS variable in sync on resize / orientation change
-    window.addEventListener('resize', updateTopbarHeight);
+    // Keep CSS variables in sync on resize / orientation change (critical for iOS Safari)
+    window.addEventListener('resize', () => { updateAppHeight(); updateTopbarHeight(); });
+    window.addEventListener('orientationchange', () => {
+      setTimeout(() => { updateAppHeight(); updateTopbarHeight(); }, 100);
+    });
 
     if (state.token) {
       showApp();

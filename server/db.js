@@ -143,6 +143,23 @@ try {
   // Column already exists, ignore
 }
 
+// Add hidden column to capcode_aliases for filtering out junk capcodes
+try {
+  db.exec("ALTER TABLE capcode_aliases ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0");
+} catch (e) {
+  // Column already exists, ignore
+}
+
+// Group keywords table (keyword matching in addition to capcodes)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS group_keywords (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    group_id INTEGER NOT NULL REFERENCES groups_(id) ON DELETE CASCADE,
+    keyword TEXT NOT NULL,
+    UNIQUE(group_id, keyword)
+  );
+`);
+
 // Normalize capcodes: strip leading zeros for consistent matching across FLEX/POCSAG
 try {
   db.exec("UPDATE group_members SET capcode = CASE WHEN LENGTH(LTRIM(capcode, '0')) = 0 THEN '0' ELSE LTRIM(capcode, '0') END WHERE capcode LIKE '0%'");

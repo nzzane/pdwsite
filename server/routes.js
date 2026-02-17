@@ -152,14 +152,21 @@ router.get('/api/messages', requireAuth, (req, res) => {
     since,
   } = req.query;
 
-  let sql = 'SELECT m.* FROM messages m';
+  let sql = 'SELECT DISTINCT m.* FROM messages m';
   const params = [];
   const conditions = [];
 
   if (group_id) {
-    sql += " INNER JOIN group_members gm ON LTRIM(m.capcode, '0') = LTRIM(gm.capcode, '0') AND gm.group_id = ?";
-    params.push(parseInt(group_id, 10));
+    const gid = parseInt(group_id, 10);
+    // Match by capcode membership OR keyword match
+    sql += ` LEFT JOIN group_members gm ON LTRIM(m.capcode, '0') = LTRIM(gm.capcode, '0') AND gm.group_id = ?`;
+    sql += ` LEFT JOIN group_keywords gk ON gk.group_id = ? AND m.content LIKE '%' || gk.keyword || '%'`;
+    conditions.push('(gm.id IS NOT NULL OR gk.id IS NOT NULL)');
+    params.push(gid, gid);
   }
+
+  // Exclude hidden capcodes by default
+  conditions.push("NOT EXISTS (SELECT 1 FROM capcode_aliases ca WHERE ca.capcode = CASE WHEN LENGTH(LTRIM(m.capcode, '0')) = 0 THEN '0' ELSE LTRIM(m.capcode, '0') END AND ca.hidden = 1)");
 
   if (capcode) {
     conditions.push('m.capcode = ?');
@@ -243,9 +250,12 @@ router.get('/api/messages/call-types', requireAuth, (req, res) => {
 
 router.get('/api/groups', requireAuth, (req, res) => {
   const groups = db.prepare(`
-    SELECT g.*, COUNT(gm.id) as member_count
+    SELECT g.*,
+      COUNT(DISTINCT gm.id) as member_count,
+      COUNT(DISTINCT gk.id) as keyword_count
     FROM groups_ g
     LEFT JOIN group_members gm ON g.id = gm.group_id
+    LEFT JOIN group_keywords gk ON g.id = gk.group_id
     GROUP BY g.id
     ORDER BY g.name
   `).all();
@@ -256,11 +266,12 @@ router.get('/api/groups/:id', requireAuth, (req, res) => {
   const group = db.prepare('SELECT * FROM groups_ WHERE id = ?').get(parseInt(req.params.id, 10));
   if (!group) return res.status(404).json({ error: 'Group not found' });
   const members = db.prepare('SELECT * FROM group_members WHERE group_id = ?').all(group.id);
-  res.json({ ...group, members });
+  const keywords = db.prepare('SELECT * FROM group_keywords WHERE group_id = ?').all(group.id);
+  res.json({ ...group, members, keywords });
 });
 
 router.post('/api/groups', requireAuth, requireAdmin, (req, res) => {
-  const { name, description, colour, capcodes } = req.body;
+  const { name, description, colour, capcodes, keywords } = req.body;
   if (!name) return res.status(400).json({ error: 'Group name required' });
   try {
     const result = db.prepare('INSERT INTO groups_ (name, description, colour, created_by) VALUES (?, ?, ?, ?)').run(
@@ -271,6 +282,12 @@ router.post('/api/groups', requireAuth, requireAdmin, (req, res) => {
       const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
       for (const cap of capcodes) {
         insert.run(groupId, parser.normalizeCapcode(cap));
+      }
+    }
+    if (keywords && Array.isArray(keywords)) {
+      const insertKw = db.prepare('INSERT OR IGNORE INTO group_keywords (group_id, keyword) VALUES (?, ?)');
+      for (const kw of keywords) {
+        if (kw.trim()) insertKw.run(groupId, kw.trim());
       }
     }
     res.json({ id: groupId, name, description, colour });
@@ -284,7 +301,7 @@ router.post('/api/groups', requireAuth, requireAdmin, (req, res) => {
 
 router.put('/api/groups/:id', requireAuth, requireAdmin, (req, res) => {
   const groupId = parseInt(req.params.id, 10);
-  const { name, description, colour, capcodes } = req.body;
+  const { name, description, colour, capcodes, keywords } = req.body;
   db.prepare('UPDATE groups_ SET name = COALESCE(?, name), description = COALESCE(?, description), colour = COALESCE(?, colour) WHERE id = ?').run(
     name || null, description !== undefined ? description : null, colour || null, groupId
   );
@@ -293,6 +310,13 @@ router.put('/api/groups/:id', requireAuth, requireAdmin, (req, res) => {
     const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
     for (const cap of capcodes) {
       insert.run(groupId, parser.normalizeCapcode(cap));
+    }
+  }
+  if (keywords && Array.isArray(keywords)) {
+    db.prepare('DELETE FROM group_keywords WHERE group_id = ?').run(groupId);
+    const insertKw = db.prepare('INSERT OR IGNORE INTO group_keywords (group_id, keyword) VALUES (?, ?)');
+    for (const kw of keywords) {
+      if (kw.trim()) insertKw.run(groupId, kw.trim());
     }
   }
   res.json({ ok: true });
@@ -316,14 +340,15 @@ router.get('/api/aliases', requireAuth, (req, res) => {
 });
 
 router.post('/api/aliases', requireAuth, requireAdmin, (req, res) => {
-  const { capcode, alias, colour, icon, call_type, location, notes, group_ids } = req.body;
+  const { capcode, alias, colour, icon, call_type, location, notes, group_ids, hidden } = req.body;
   if (!capcode || !alias) return res.status(400).json({ error: 'Capcode and alias required' });
   const normCapcode = parser.normalizeCapcode(capcode);
+  const hiddenVal = hidden ? 1 : 0;
   try {
     db.prepare(
-      'INSERT INTO capcode_aliases (capcode, alias, colour, icon, call_type, location, notes) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(capcode) DO UPDATE SET alias=?, colour=?, icon=?, call_type=?, location=?, notes=?'
-    ).run(normCapcode, alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null,
-      alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null);
+      'INSERT INTO capcode_aliases (capcode, alias, colour, icon, call_type, location, notes, hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(capcode) DO UPDATE SET alias=?, colour=?, icon=?, call_type=?, location=?, notes=?, hidden=?'
+    ).run(normCapcode, alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null, hiddenVal,
+      alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null, hiddenVal);
 
     // Update group memberships if provided
     if (Array.isArray(group_ids)) {
@@ -542,6 +567,7 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
         insertedMsg.alias_colour = alias.colour;
         insertedMsg.alias_icon = alias.icon;
         insertedMsg.alias_notes = alias.notes;
+        if (alias.hidden) insertedMsg.hidden = true;
       }
 
       // Add incident number if present
@@ -623,10 +649,24 @@ function sendPushForMessage(msg) {
 
   const normCapcode = parser.normalizeCapcode(msg.capcode);
 
-  // Find groups this capcode belongs to (normalize for FLEX/POCSAG matching)
-  const groups = db.prepare(
+  // Check if this capcode is hidden - skip push notifications for hidden capcodes
+  const hiddenAlias = db.prepare('SELECT 1 FROM capcode_aliases WHERE capcode = ? AND hidden = 1').get(normCapcode);
+  if (hiddenAlias) return;
+
+  // Find groups this capcode belongs to (by capcode OR keyword match)
+  const capcodeGroups = db.prepare(
     "SELECT g.id, g.name FROM groups_ g JOIN group_members gm ON g.id = gm.group_id WHERE LTRIM(gm.capcode, '0') = ?"
   ).all(normCapcode);
+
+  const content = (msg.content || '').toLowerCase();
+  const keywordGroups = content ? db.prepare(
+    "SELECT DISTINCT g.id, g.name FROM groups_ g JOIN group_keywords gk ON g.id = gk.group_id WHERE LOWER(?) LIKE '%' || LOWER(gk.keyword) || '%'"
+  ).all(content) : [];
+
+  // Merge and deduplicate groups
+  const groupMap = new Map();
+  for (const g of [...capcodeGroups, ...keywordGroups]) groupMap.set(g.id, g);
+  const groups = Array.from(groupMap.values());
 
   // ─── Group-based notifications ───
   if (groups.length > 0) {
