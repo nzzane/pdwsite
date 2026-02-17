@@ -152,6 +152,7 @@ router.get('/api/messages', requireAuth, (req, res) => {
     group_id,
     search,
     since,
+    protocol,
   } = req.query;
 
   let sql = 'SELECT DISTINCT m.* FROM messages m';
@@ -193,6 +194,10 @@ router.get('/api/messages', requireAuth, (req, res) => {
   if (search) {
     conditions.push('m.content LIKE ?');
     params.push(`%${search}%`);
+  }
+  if (protocol) {
+    conditions.push('m.protocol = ?');
+    params.push(protocol);
   }
   if (since) {
     conditions.push('m.received_at > ?');
@@ -513,6 +518,42 @@ router.put('/api/alarm-level-alert', requireAuth, (req, res) => {
   res.json({ ok: true, min_alarm_level: level });
 });
 
+// ─── FLEX incident dedup buffer ───
+// FLEX group pages send the same message to multiple capcodes simultaneously.
+// Some capcodes get truncated content. Buffer by incident number and keep the longest version.
+const incidentBuffer = new Map();
+const INCIDENT_BUFFER_MS = 5000; // 5 second window to collect all fragments
+
+function bufferByIncident(msg) {
+  // Only buffer FLEX messages with an incident number
+  if (msg.protocol !== 'FLEX') return null;
+  const incidentNum = parser.extractIncidentNumber(msg.content);
+  if (!incidentNum) return null;
+
+  let entry = incidentBuffer.get(incidentNum);
+  if (!entry) {
+    entry = { messages: [], timer: null };
+    incidentBuffer.set(incidentNum, entry);
+  }
+
+  entry.messages.push({ ...msg });
+
+  // Reset the timer each time a new fragment arrives
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => {
+    incidentBuffer.delete(incidentNum);
+    // Pick the message with the longest content (most complete version)
+    const best = entry.messages.reduce((a, b) =>
+      (b.content || '').length > (a.content || '').length ? b : a
+    );
+    best.is_multipart = true;
+    best.multipart_id = incidentNum;
+    insertAndBroadcast(best);
+  }, INCIDENT_BUFFER_MS);
+
+  return { buffered: true };
+}
+
 // ─── Ingestion endpoint (called by client script) ───
 
 /**
@@ -620,6 +661,13 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
         msg.content = mpResult.joined;
         msg.is_multipart = true;
         msg.multipart_id = msg.capcode;
+      }
+
+      // FLEX incident dedup: buffer FLEX messages with same F-number, keep longest
+      const incResult = bufferByIncident(msg);
+      if (incResult) {
+        // Message buffered - will be inserted after timeout with best version
+        continue;
       }
 
       const insertedMsg = insertAndBroadcast(msg);

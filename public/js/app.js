@@ -353,8 +353,10 @@
     if (!content) return false;
     // "Unit: MALB1 Assigned to Station: Picton"
     if (/\bUnit:\s*\S+\s+Assigned to Station:/i.test(content)) return true;
-    // "CHR2 Ref:0115-3-2026/02/18 Disp:06:13Resp:06:14Loc:06:31Dep:07:11Dest:07:45"
+    // Abbreviated timing: "CHR2 Ref:0115-3-2026/02/18 Disp:06:13Resp:06:14Loc:06:31Dep:07:11Dest:07:45"
     if (/Ref:\S+\s*Disp:\S+\s*Resp:/i.test(content)) return true;
+    // Full-word timing: "Unit:HAM6 Job #0231-1-2026/0Responded:08:23Located:08:33Departed:09:09Destination:09:31"
+    if (/Responded:\d{2}:\d{2}|Located:\d{2}:\d{2}|Departed:\d{2}:\d{2}|Destination:\d{2}:\d{2}/i.test(content)) return true;
     // "Assigned to Station:" without Unit prefix
     if (/\bAssigned to Station:/i.test(content)) return true;
     // Status messages like "Enroute", "On Scene", "Available"
@@ -516,6 +518,7 @@
   function matchesFilters(msg) {
     const search = $('#filter-search').value.toLowerCase();
     const callType = $('#filter-call-type').value;
+    const protocol = $('#filter-protocol').value;
     const capcode = $('#filter-capcode').value;
     const location = $('#filter-location').value.toLowerCase();
     const trucks = $('#filter-trucks').value.toLowerCase();
@@ -527,6 +530,7 @@
 
     if (search && !(msg.content || '').toLowerCase().includes(search)) return false;
     if (callType && msg.call_type !== callType) return false;
+    if (protocol && msg.protocol !== protocol) return false;
     if (capcode && normalizeCapcode(msg.capcode) !== normalizeCapcode(capcode)) return false;
     if (location && !(msg.location || '').toLowerCase().includes(location)) return false;
     if (trucks && !(msg.trucks || '').toLowerCase().includes(trucks)) return false;
@@ -722,6 +726,7 @@
           const f = JSON.parse(el.dataset.savedFilter);
           if (f.search) $('#filter-search').value = f.search;
           if (f.call_type) $('#filter-call-type').value = f.call_type;
+          if (f.protocol) $('#filter-protocol').value = f.protocol;
           if (f.capcode) $('#filter-capcode').value = f.capcode;
           if (f.location) $('#filter-location').value = f.location;
           if (f.trucks) $('#filter-trucks').value = f.trucks;
@@ -768,6 +773,7 @@
         params.set('limit', '100');
         const search = $('#filter-search').value;
         const callType = $('#filter-call-type').value;
+        const protocol = $('#filter-protocol').value;
         const capcode = $('#filter-capcode').value;
         const location = $('#filter-location').value;
         const trucks = $('#filter-trucks').value;
@@ -775,6 +781,7 @@
         const hideTest = $('#filter-hide-test') && $('#filter-hide-test').checked;
         if (search) params.set('search', search);
         if (callType) params.set('call_type', callType);
+        if (protocol) params.set('protocol', protocol);
         if (capcode) params.set('capcode', capcode);
         if (location) params.set('location', location);
         if (trucks) params.set('trucks', trucks);
@@ -803,12 +810,14 @@
     params.set('offset', (page * state.searchLimit).toString());
     const search = $('#filter-search').value;
     const callType = $('#filter-call-type').value;
+    const protocol = $('#filter-protocol').value;
     const capcode = $('#filter-capcode').value;
     const location = $('#filter-location').value;
     const trucks = $('#filter-trucks').value;
     const groupId = $('#filter-group').value;
     if (search) params.set('search', search);
     if (callType) params.set('call_type', callType);
+    if (protocol) params.set('protocol', protocol);
     if (capcode) params.set('capcode', capcode);
     if (location) params.set('location', location);
     if (trucks) params.set('trucks', trucks);
@@ -1290,6 +1299,7 @@
       const filter = {};
       if ($('#filter-search').value) filter.search = $('#filter-search').value;
       if ($('#filter-call-type').value) filter.call_type = $('#filter-call-type').value;
+      if ($('#filter-protocol').value) filter.protocol = $('#filter-protocol').value;
       if ($('#filter-capcode').value) filter.capcode = $('#filter-capcode').value;
       if ($('#filter-location').value) filter.location = $('#filter-location').value;
       if ($('#filter-trucks').value) filter.trucks = $('#filter-trucks').value;
@@ -1657,6 +1667,7 @@
       // Clear all filters
       $('#filter-search').value = '';
       $('#filter-call-type').value = '';
+      $('#filter-protocol').value = '';
       $('#filter-capcode').value = '';
       $('#filter-location').value = '';
       $('#filter-trucks').value = '';
@@ -1716,6 +1727,7 @@
     // Filters
     $('#filter-search').addEventListener('input', onFilterChange);
     $('#filter-call-type').addEventListener('change', onFilterChange);
+    $('#filter-protocol').addEventListener('change', onFilterChange);
     $('#filter-capcode').addEventListener('input', onFilterChange);
     $('#filter-location').addEventListener('input', onFilterChange);
     $('#filter-trucks').addEventListener('input', onFilterChange);
@@ -1724,6 +1736,7 @@
     $('#btn-clear-filters').addEventListener('click', () => {
       $('#filter-search').value = '';
       $('#filter-call-type').value = '';
+      $('#filter-protocol').value = '';
       $('#filter-capcode').value = '';
       $('#filter-location').value = '';
       $('#filter-trucks').value = '';
