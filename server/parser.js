@@ -134,6 +134,18 @@ function extractTrucks(content) {
 }
 
 /**
+ * Extract NZ ambulance/fire priority colour from message content.
+ * Ambo pages typically start with a truck code then the priority colour:
+ *   A1WAIK RED 1 RESPAIHT ...
+ * Priority colours: PURPLE (life threatening), RED (serious), ORANGE (urgent), GREEN (non-urgent)
+ */
+function extractPriority(content) {
+  if (!content) return null;
+  const m = content.match(/\b(PURPLE|RED|ORANGE|GREEN)\s+\d/i);
+  return m ? m[1].toUpperCase() : null;
+}
+
+/**
  * Generate a dedup hash for a message.
  */
 function dedupeHash(capcode, content) {
@@ -326,6 +338,7 @@ function enrichMessage(parsed) {
     location: extractLocation(content),
     trucks: extractTrucks(content),
     incident_number: extractIncidentNumber(content),
+    priority: extractPriority(content),
     hash: dedupeHash(parsed.capcode, content),
   };
 }
@@ -338,6 +351,7 @@ module.exports = {
   extractLocation,
   extractTrucks,
   extractIncidentNumber,
+  extractPriority,
   dedupeHash,
   isDuplicate,
   parseMultipart,

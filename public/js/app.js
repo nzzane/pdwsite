@@ -128,6 +128,13 @@
     return content;
   }
 
+  // ─── Extract priority colour from ambo/fire pages ───
+  function extractPriorityFromContent(content) {
+    if (!content) return null;
+    const m = content.match(/\b(PURPLE|RED|ORANGE|GREEN)\s+\d/i);
+    return m ? m[1].toUpperCase() : null;
+  }
+
   // ─── Render a message card ───
   function renderMessageCard(msg) {
     const colour = msg.call_type ? (CALL_TYPE_COLOURS[msg.call_type] || '#6b7280') : (msg.alias_colour || '#6b7280');
@@ -141,6 +148,12 @@
     card.className = 'msg-card highlight';
     card.style.borderLeftColor = colour;
     card.dataset.id = msg.id;
+
+    // Apply priority-based background tint (ambo/fire pages with colour codes)
+    const priority = msg.priority || extractPriorityFromContent(msg.content);
+    if (priority) {
+      card.classList.add('priority-' + priority.toLowerCase());
+    }
 
     // Header: capcode (clickable for admin), alias, call type badge, protocol, time
     const capcodeClass = isAdmin ? 'msg-capcode msg-capcode-admin' : 'msg-capcode';
@@ -985,13 +998,26 @@
 
   // ─── Push notifications ───
   async function enableNotifications() {
-    if (!('Notification' in window) || !('serviceWorker' in navigator)) {
-      toast('Push notifications not supported in this browser', 'error');
+    if (!('serviceWorker' in navigator)) {
+      toast('Service workers not supported. Try Chrome, Edge, or Firefox.', 'error');
+      return;
+    }
+    if (!('Notification' in window)) {
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+      if (isIOS) {
+        toast('On iOS, install this app to your Home Screen first (Share > Add to Home Screen), then try again.', 'error');
+      } else {
+        toast('Notifications not supported. Ensure you are using HTTPS and a modern browser.', 'error');
+      }
+      return;
+    }
+    if (!('PushManager' in window)) {
+      toast('Push notifications not supported in this browser. Try Chrome or Firefox.', 'error');
       return;
     }
     const permission = await Notification.requestPermission();
     if (permission !== 'granted') {
-      toast('Notification permission denied', 'error');
+      toast('Notification permission denied. Check your browser settings.', 'error');
       return;
     }
     try {

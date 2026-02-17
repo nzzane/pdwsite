@@ -64,7 +64,7 @@ a:hover { text-decoration: underline; }
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
-  font-size: 0.9rem;
+  font-size: 16px; /* Prevents iOS auto-zoom on focus */
   outline: none;
   transition: border-color 0.15s;
 }
@@ -117,13 +117,14 @@ a:hover { text-decoration: underline; }
   display: flex;
   align-items: center;
   justify-content: space-between;
-  height: var(--topbar-h);
+  min-height: var(--topbar-h);
   padding: 0 1rem;
   padding-top: var(--safe-top);
   background: var(--bg-card);
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
   z-index: 100;
+  position: relative;
 }
 .topbar-left { display: flex; align-items: center; gap: 0.75rem; }
 .topbar-title { font-size: 1.1rem; font-weight: 600; }
@@ -251,7 +252,7 @@ a:hover { text-decoration: underline; }
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
-  font-size: 0.8rem;
+  font-size: 16px; /* Prevents iOS auto-zoom on focus */
   outline: none;
   min-width: 0;
 }
@@ -301,6 +302,12 @@ a:hover { text-decoration: underline; }
 }
 .msg-card:hover { border-color: var(--primary); }
 .msg-card.highlight { animation: flashIn 0.4s ease; }
+
+/* Priority-tinted message cards (ambo/fire pages with colour codes) */
+.msg-card.priority-purple { background: rgba(147, 51, 234, 0.12); border-left-color: #9333ea; }
+.msg-card.priority-red { background: rgba(220, 38, 38, 0.12); border-left-color: #dc2626; }
+.msg-card.priority-orange { background: rgba(234, 88, 12, 0.12); border-left-color: #ea580c; }
+.msg-card.priority-green { background: rgba(22, 163, 98, 0.10); border-left-color: #16a34a; }
 @keyframes flashIn {
   0% { background: rgba(59,130,246,0.15); }
   100% { background: var(--bg-card); }
@@ -600,7 +607,7 @@ a:hover { text-decoration: underline; }
   .sidebar-overlay { display: none !important; }
   #app-screen.active {
     display: grid;
-    grid-template-rows: var(--topbar-h) 1fr;
+    grid-template-rows: auto 1fr;
     grid-template-columns: var(--sidebar-w) 1fr;
   }
   .topbar { grid-column: 1 / -1; }

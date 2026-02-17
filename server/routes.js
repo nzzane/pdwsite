@@ -198,6 +198,21 @@ router.get('/api/messages', requireAuth, (req, res) => {
   params.push(Math.min(parseInt(limit, 10) || 100, 500), parseInt(offset, 10) || 0);
 
   const messages = db.prepare(sql).all(...params);
+
+  // Enrich with computed fields not stored in DB
+  for (const msg of messages) {
+    const priority = parser.extractPriority(msg.content);
+    if (priority) msg.priority = priority;
+    const alias = db.prepare('SELECT alias, colour, icon, notes FROM capcode_aliases WHERE capcode = ?').get(msg.capcode);
+    if (alias) {
+      msg.alias = alias.alias;
+      msg.alias_colour = alias.colour;
+      msg.alias_notes = alias.notes;
+    }
+    const incidentNum = parser.extractIncidentNumber(msg.content);
+    if (incidentNum) msg.incident_number = incidentNum;
+  }
+
   res.json(messages);
 });
 
@@ -473,6 +488,12 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
       const incidentNum = parser.extractIncidentNumber(msg.content);
       if (incidentNum) {
         insertedMsg.incident_number = incidentNum;
+      }
+
+      // Add priority colour if present (ambo/fire pages)
+      const priority = parser.extractPriority(msg.content);
+      if (priority) {
+        insertedMsg.priority = priority;
       }
 
       inserted.push(insertedMsg);
