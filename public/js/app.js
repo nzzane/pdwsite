@@ -1288,6 +1288,9 @@
     connectWs();
     await loadInitialData();
 
+    // Auto-subscribe to push if permission already granted (ensures background notifications work)
+    autoSubscribePush();
+
     // Show first-login disclaimer if not yet accepted
     if (!localStorage.getItem('pdw_disclaimer_accepted')) {
       showDisclaimerModal();
@@ -1483,10 +1486,37 @@
   async function registerSW() {
     if ('serviceWorker' in navigator) {
       try {
-        await navigator.serviceWorker.register('/sw.js');
+        const reg = await navigator.serviceWorker.register('/sw.js');
+        // Check for updates periodically (every 30 min)
+        setInterval(() => reg.update(), 30 * 60 * 1000);
       } catch (err) {
         console.warn('SW registration failed:', err);
       }
+    }
+  }
+
+  // ─── Auto-subscribe to push if permission already granted ───
+  async function autoSubscribePush() {
+    try {
+      if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) return;
+      if (Notification.permission !== 'granted') return;
+      const reg = await navigator.serviceWorker.ready;
+      const existing = await reg.pushManager.getSubscription();
+      // Re-subscribe to ensure the server has a valid subscription
+      // (handles service worker updates, new VAPID keys, etc.)
+      const { publicKey } = await api('/api/push/vapid-key');
+      if (!publicKey) return;
+      let sub = existing;
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey),
+        });
+      }
+      await api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: sub.toJSON() }) });
+      console.log('Push subscription synced');
+    } catch (err) {
+      console.warn('Auto push subscribe failed:', err.message);
     }
   }
 

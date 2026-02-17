@@ -1,6 +1,7 @@
 {
   "name": "PDW Monitor",
   "short_name": "PDW",
+  "id": "/",
   "description": "Pager Monitoring - POCSAG & FLEX decoder with live feed, filtering, and notifications",
   "start_url": "/",
   "display": "standalone",

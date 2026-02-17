@@ -18,6 +18,9 @@ process.on('unhandledRejection', (reason) => {
 const app = express();
 const server = http.createServer(app);
 
+// Trust reverse proxy (nginx, Caddy, etc.) for correct protocol/IP detection
+app.set('trust proxy', true);
+
 // Middleware
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));

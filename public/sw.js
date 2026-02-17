@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pdw-v1';
+const CACHE_NAME = 'pdw-v2';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
@@ -27,7 +27,7 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Fetch - network first for API, cache first for static
+// Fetch - network first with cache fallback
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
@@ -37,20 +37,16 @@ self.addEventListener('fetch', (event) => {
   }
 
   event.respondWith(
-    caches.match(event.request).then((cached) => {
-      const fetching = fetch(event.request)
-        .then((response) => {
-          // Update cache with fresh response
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
-          }
-          return response;
-        })
-        .catch(() => cached); // Fall back to cache on network failure
-
-      return cached || fetching;
-    })
+    fetch(event.request)
+      .then((response) => {
+        // Update cache with fresh response
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        }
+        return response;
+      })
+      .catch(() => caches.match(event.request)) // Fall back to cache on network failure
   );
 });
 
