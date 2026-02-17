@@ -515,6 +515,84 @@ router.put('/api/alarm-level-alert', requireAuth, (req, res) => {
 
 // ─── Ingestion endpoint (called by client script) ───
 
+/**
+ * Insert a fully-assembled message into DB, broadcast, and send push notifications.
+ * Returns the inserted message row or null.
+ */
+function insertAndBroadcast(msg) {
+  // Enrich
+  const callType = msg.call_type || parser.detectCallType(msg.content);
+  const location = msg.location || parser.extractLocation(msg.content);
+  const trucks = msg.trucks || parser.extractTrucks(msg.content);
+  const hash = parser.dedupeHash(msg.capcode, msg.content);
+
+  // Dedup check
+  if (parser.isDuplicate(db, hash)) return null;
+
+  // Check capcode alias for overrides (normalize to handle FLEX leading zeros)
+  const normCapcode = parser.normalizeCapcode(msg.capcode);
+  const alias = db.prepare('SELECT * FROM capcode_aliases WHERE capcode = ?').get(normCapcode);
+
+  const finalCallType = callType || (alias && alias.call_type) || null;
+  const finalLocation = location || (alias && alias.location) || null;
+
+  const result = db.prepare(`
+    INSERT INTO messages (capcode, content, protocol, bitrate, function_code, source, call_type, location, trucks, is_multipart, multipart_id, raw, hash, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+  `).run(
+    msg.capcode,
+    msg.content || '',
+    msg.protocol || 'POCSAG',
+    msg.bitrate || null,
+    msg.function_code || 0,
+    msg.source || 'client',
+    finalCallType,
+    finalLocation,
+    trucks,
+    msg.is_multipart ? 1 : 0,
+    msg.multipart_id || null,
+    msg.raw || null,
+    hash
+  );
+
+  const insertedMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(result.lastInsertRowid);
+
+  // Add alias info for broadcast
+  if (alias) {
+    insertedMsg.alias = alias.alias;
+    insertedMsg.alias_colour = alias.colour;
+    insertedMsg.alias_icon = alias.icon;
+    insertedMsg.alias_notes = alias.notes;
+    if (alias.hidden) insertedMsg.hidden = true;
+  }
+
+  // Add incident number if present
+  const incidentNum = parser.extractIncidentNumber(msg.content);
+  if (incidentNum) {
+    insertedMsg.incident_number = incidentNum;
+  }
+
+  // Add priority colour if present (ambo/fire pages)
+  const priority = parser.extractPriority(msg.content);
+  if (priority) {
+    insertedMsg.priority = priority;
+  }
+
+  // Add alarm level if present (multi-alarm fires)
+  const alarmLevel = parser.extractAlarmLevel(msg.content);
+  if (alarmLevel) {
+    insertedMsg.alarm_level = alarmLevel;
+  }
+
+  // Broadcast via WebSocket
+  broadcast({ type: 'message', data: insertedMsg });
+
+  // Send push notifications for matching groups
+  sendPushForMessage(insertedMsg);
+
+  return insertedMsg;
+}
+
 router.post('/api/ingest', requireApiKey, (req, res) => {
   try {
     const messages = Array.isArray(req.body) ? req.body : [req.body];
@@ -526,77 +604,26 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
       // Clean control character tags from content
       msg.content = parser.cleanContent(msg.content);
 
-      // Enrich
-      const callType = msg.call_type || parser.detectCallType(msg.content);
-      const location = msg.location || parser.extractLocation(msg.content);
-      const trucks = msg.trucks || parser.extractTrucks(msg.content);
-      const hash = parser.dedupeHash(msg.capcode, msg.content);
+      // Check for multipart messages (e.g. "1/3", "PART 1 of 3")
+      const mpResult = parser.handleMultipart(msg.capcode, msg.content, (capcode, joinedContent, isPartial) => {
+        // Timeout callback: flush partial multipart message
+        const partialMsg = { ...msg, content: joinedContent, is_multipart: true, multipart_id: capcode };
+        insertAndBroadcast(partialMsg);
+      });
 
-      // Dedup check
-      if (parser.isDuplicate(db, hash)) continue;
-
-      // Check capcode alias for overrides (normalize to handle FLEX leading zeros)
-      const normCapcode = parser.normalizeCapcode(msg.capcode);
-      const alias = db.prepare('SELECT * FROM capcode_aliases WHERE capcode = ?').get(normCapcode);
-
-      const finalCallType = callType || (alias && alias.call_type) || null;
-      const finalLocation = location || (alias && alias.location) || null;
-
-      const result = db.prepare(`
-        INSERT INTO messages (capcode, content, protocol, bitrate, function_code, source, call_type, location, trucks, is_multipart, multipart_id, raw, hash, received_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-      `).run(
-        msg.capcode,
-        msg.content || '',
-        msg.protocol || 'POCSAG',
-        msg.bitrate || null,
-        msg.function_code || 0,
-        msg.source || 'client',
-        finalCallType,
-        finalLocation,
-        trucks,
-        msg.is_multipart ? 1 : 0,
-        msg.multipart_id || null,
-        msg.raw || null,
-        hash
-      );
-
-      const insertedMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(result.lastInsertRowid);
-
-      // Add alias info for broadcast
-      if (alias) {
-        insertedMsg.alias = alias.alias;
-        insertedMsg.alias_colour = alias.colour;
-        insertedMsg.alias_icon = alias.icon;
-        insertedMsg.alias_notes = alias.notes;
-        if (alias.hidden) insertedMsg.hidden = true;
+      if (mpResult) {
+        if (!mpResult.isComplete) {
+          // Still waiting for more parts - don't insert yet
+          continue;
+        }
+        // All parts received - insert the joined message
+        msg.content = mpResult.joined;
+        msg.is_multipart = true;
+        msg.multipart_id = msg.capcode;
       }
 
-      // Add incident number if present
-      const incidentNum = parser.extractIncidentNumber(msg.content);
-      if (incidentNum) {
-        insertedMsg.incident_number = incidentNum;
-      }
-
-      // Add priority colour if present (ambo/fire pages)
-      const priority = parser.extractPriority(msg.content);
-      if (priority) {
-        insertedMsg.priority = priority;
-      }
-
-      // Add alarm level if present (multi-alarm fires)
-      const alarmLevel = parser.extractAlarmLevel(msg.content);
-      if (alarmLevel) {
-        insertedMsg.alarm_level = alarmLevel;
-      }
-
-      inserted.push(insertedMsg);
-
-      // Broadcast via WebSocket
-      broadcast({ type: 'message', data: insertedMsg });
-
-      // Send push notifications for matching groups
-      sendPushForMessage(insertedMsg);
+      const insertedMsg = insertAndBroadcast(msg);
+      if (insertedMsg) inserted.push(insertedMsg);
     }
 
     res.json({ inserted: inserted.length });

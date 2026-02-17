@@ -286,11 +286,11 @@
       incidentHtml = `<div class="msg-incident"><a href="https://sitrep.fireandemergency.nz/report/${esc(incidentNum)}" target="_blank" rel="noopener" class="incident-link">${esc(incidentNum)}</a></div>`;
     }
 
-    // Location + time of call
+    // Location + date/time of call
     let metaHtml = '';
     if (msg.location) metaHtml += `<span class="msg-meta-item">&#x1f4cd; ${esc(msg.location)}</span>`;
-    // Show formatted time next to location
-    metaHtml += `<span class="msg-meta-item">&#x1f552; ${formatTime(msg.received_at)}</span>`;
+    // Show formatted date and time next to location
+    metaHtml += `<span class="msg-meta-item">&#x1f552; ${formatDateTime(msg.received_at)}</span>`;
 
     // Fire/Ambo type icon
     let typeIconHtml = '';
