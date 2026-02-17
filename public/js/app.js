@@ -26,34 +26,164 @@
   };
 
   // ─── Call type categories ───
-  const FIRE_TYPES = ['STRUCTURE FIRE', 'VEGETATION FIRE', 'RUBBISH FIRE', 'VEHICLE FIRE', 'CHIMNEY FIRE', 'RURAL FIRE'];
-  const AMBO_TYPES = ['AMBO', 'CARDIAC', 'BREATHING', 'TRAUMA'];
+  const FIRE_TYPES = [
+    'ADV',
+    'EXERCISE',
+    'FIREALM',
+    'FIRETEST',
+    'HAZ',
+    'HAZGAS',
+    'MED',
+    'MEDFR',
+    'MIN',
+    'NAT1',
+    'NAT2',
+    'NAT3',
+    'STRU',
+    'MVC',
+    'STNCALL',
+    'MVCHEVY',
+    'MVCRESC',
+    'RESC',
+    'SHIP',
+    'SPRNKLR',
+    'VEG',
+    'TRA',
+    'USAR',
+    'WATRESC'
+  ];
+  const AMBO_TYPES = [
+    'ABDO PAIN',
+    'ABNORMAL BREATHING',
+    'ACCIDENT',
+    'ACUTE ADMISSION',
+    'ALLERGY',
+    'ALTERED LOC',
+    'ARREST',
+    'ASSAULT',
+    'BACK PAIN',
+    'BITE/ATTACK',
+    'BURNS',
+    'CARDIAC PROBLEM',
+    'CHEST PAIN',
+    'CHOKING',
+    'CO/INH/HAZ',
+    'COMMUNITY ALARM',
+    'DIABETIC',
+    'DIFFICULTY BREATHING',
+    'DIZZINESS/VERTIGO',
+    'DROWNING',
+    'ELECTROCUTION',
+    'EYE INJURY',
+    'FAINT',
+    'FALL',
+    'FEVER/CHILLS',
+    'FITTING',
+    'HAEMORRHAGE',
+    'HEADACHE',
+    'HEART PROBLEM',
+    'HEAT EXPOSURE',
+    'IMPENDING FIT',
+    'INEFFECTIVE BREATHING',
+    'INTENDING SUICIDE',
+    'MVA',
+    'NAUSEA',
+    'NEAR DROWNING',
+    'OBSTETRIC',
+    'OVERDOSE',
+    'PAIN',
+    'PARALYSIS',
+    'POISONING',
+    'PSYCH/SUICIDE',
+    'RESPIRATORY ARREST',
+    'SEIZURE',
+    'SERIOUS HAEMORRHAGE',
+    'SICK PERSON',
+    'STAB/GSW',
+    'STROKE',
+    'SUICIDAL IDEATION',
+    'TRAUMA',
+    'UNCONSCIOUS',
+    'UNKNOWN PROBLEM',
+    'VOMITING',
+    'WEAKNESS/NUMBNESS'
+  ];
 
   // ─── Call type colours ───
   const CALL_TYPE_COLOURS = {
-    'STRUCTURE FIRE': '#dc2626',
-    'VEGETATION FIRE': '#ea580c',
-    'RUBBISH FIRE': '#f59e0b',
-    'VEHICLE FIRE': '#dc2626',
-    'CHIMNEY FIRE': '#ea580c',
-    'MVC': '#7c3aed',
-    'MIN': '#2563eb',
-    'RESCUE': '#0891b2',
-    'HAZMAT': '#ca8a04',
-    'AMBO': '#16a34a',
-    'CARDIAC': '#dc2626',
-    'BREATHING': '#16a34a',
-    'TRAUMA': '#9333ea',
-    'ALARM': '#64748b',
-    'SPECIAL SERVICE': '#0284c7',
-    'ASSIST': '#6366f1',
-    'TEST': '#9ca3af',
-    'PROWLER': '#475569',
-    'FLOODING': '#0ea5e9',
-    'SLIP': '#78716c',
-    'LIFT RESCUE': '#0891b2',
-    'WATER RESCUE': '#0284c7',
-    'RURAL FIRE': '#ea580c',
+    // Cardiac / critical
+    'ARREST': '#dc2626',
+    'CARDIAC PROBLEM': '#dc2626',
+    'CHEST PAIN': '#dc2626',
+    'HEART PROBLEM': '#dc2626',
+    'RESPIRATORY ARREST': '#dc2626',
+  
+    // Breathing / respiratory
+    'ABNORMAL BREATHING': '#16a34a',
+    'DIFFICULTY BREATHING': '#16a34a',
+    'INEFFECTIVE BREATHING': '#16a34a',
+    'CHOKING': '#16a34a',
+  
+    // Neurological
+    'STROKE': '#9333ea',
+    'SEIZURE': '#9333ea',
+    'FITTING': '#9333ea',
+    'ALTERED LOC': '#9333ea',
+    'UNCONSCIOUS': '#9333ea',
+    'PARALYSIS': '#9333ea',
+    'WEAKNESS/NUMBNESS': '#9333ea',
+  
+    // Trauma / injury
+    'TRAUMA': '#7c3aed',
+    'FALL': '#7c3aed',
+    'MVA': '#7c3aed',
+    'ASSAULT': '#7c3aed',
+    'STAB/GSW': '#7c3aed',
+    'BURNS': '#ea580c',
+    'EYE INJURY': '#ea580c',
+    'BITE/ATTACK': '#ea580c',
+  
+    // Medical general
+    'SICK PERSON': '#2563eb',
+    'ABDO PAIN': '#2563eb',
+    'BACK PAIN': '#2563eb',
+    'PAIN': '#2563eb',
+    'FEVER/CHILLS': '#2563eb',
+    'NAUSEA': '#2563eb',
+    'VOMITING': '#2563eb',
+    'DIABETIC': '#2563eb',
+    'ALLERGY': '#2563eb',
+    'HEADACHE': '#2563eb',
+    'DIZZINESS/VERTIGO': '#2563eb',
+  
+    // Bleeding
+    'HAEMORRHAGE': '#b91c1c',
+    'SERIOUS HAEMORRHAGE': '#991b1b',
+  
+    // Obstetric
+    'OBSTETRIC': '#db2777',
+  
+    // Hazard / environment
+    'CO/INH/HAZ': '#ca8a04',
+    'ELECTROCUTION': '#ca8a04',
+    'HEAT EXPOSURE': '#ca8a04',
+  
+    // Water incidents
+    'DROWNING': '#0284c7',
+    'NEAR DROWNING': '#0284c7',
+  
+    // Mental health
+    'PSYCH/SUICIDE': '#475569',
+    'SUICIDAL IDEATION': '#475569',
+    'INTENDING SUICIDE': '#475569',
+  
+    // Other / system
+    'COMMUNITY ALARM': '#64748b',
+    'UNKNOWN PROBLEM': '#6b7280',
+    'ACCIDENT': '#6366f1',
+    'ACUTE ADMISSION': '#0ea5e9',
+    'OVERDOSE': '#8b5cf6',
+    'POISONING': '#8b5cf6'
   };
 
   // ─── DOM refs ───
