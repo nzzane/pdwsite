@@ -112,35 +112,90 @@
     return div.innerHTML;
   }
 
+  // ─── Extract incident/F-number from content ───
+  function extractIncidentNumber(content) {
+    if (!content) return null;
+    const m = content.match(/#?(F\d{6,})\b/);
+    return m ? m[1] : null;
+  }
+
+  // ─── Strip trucks from content for display ───
+  function contentWithoutTrucks(content, trucks) {
+    if (!content || !trucks) return content;
+    // If content starts with parenthesized list, strip it
+    const parenMatch = content.match(/^\([^)]+\)\s*/);
+    if (parenMatch) return content.slice(parenMatch[0].length);
+    return content;
+  }
+
   // ─── Render a message card ───
   function renderMessageCard(msg) {
     const colour = msg.call_type ? (CALL_TYPE_COLOURS[msg.call_type] || '#6b7280') : (msg.alias_colour || '#6b7280');
-    const alias = msg.alias || state.aliases[msg.capcode];
-    const aliasName = alias ? (typeof alias === 'string' ? alias : alias.alias) : null;
-    const aliasColour = alias && typeof alias === 'object' ? alias.colour : colour;
+    const aliasObj = state.aliases[msg.capcode];
+    const aliasName = msg.alias || (aliasObj ? aliasObj.alias : null);
+    const aliasColour = aliasObj ? aliasObj.colour : (msg.alias_colour || colour);
+    const aliasNotes = msg.alias_notes || (aliasObj ? aliasObj.notes : null);
+    const isAdmin = state.user && state.user.role === 'admin';
 
     const card = document.createElement('div');
     card.className = 'msg-card highlight';
     card.style.borderLeftColor = colour;
     card.dataset.id = msg.id;
 
-    let headerHtml = `<span class="msg-capcode">${esc(msg.capcode)}</span>`;
-    if (aliasName) headerHtml += `<span class="msg-alias" style="color:${esc(aliasColour)}">${esc(aliasName)}</span>`;
+    // Header: capcode (clickable for admin), alias, call type badge, protocol, time
+    const capcodeClass = isAdmin ? 'msg-capcode msg-capcode-admin' : 'msg-capcode';
+    let headerHtml = `<span class="${capcodeClass}" data-capcode="${esc(msg.capcode)}">${esc(msg.capcode)}</span>`;
+    if (aliasName) headerHtml += `<span class="msg-alias" style="color:${esc(aliasColour)}" title="${esc(aliasNotes || '')}">${esc(aliasName)}</span>`;
     if (msg.call_type) headerHtml += `<span class="msg-badge" style="background:${colour}">${esc(msg.call_type)}</span>`;
     headerHtml += `<span class="msg-protocol">${esc(msg.protocol)}${msg.bitrate ? '/' + msg.bitrate : ''}</span>`;
     headerHtml += `<span class="msg-time" title="${esc(formatDateTime(msg.received_at))}">${timeAgo(msg.received_at)}</span>`;
 
+    // Trucks (bold, prominent)
+    let trucksHtml = '';
+    if (msg.trucks) {
+      trucksHtml = `<div class="msg-trucks">${esc(msg.trucks)}</div>`;
+    }
+
+    // Content (with trucks stripped from display if they were at the start)
+    const displayContent = contentWithoutTrucks(msg.content, msg.trucks);
+
+    // Incident number (F-number, clickable)
+    const incidentNum = msg.incident_number || extractIncidentNumber(msg.content);
+    let incidentHtml = '';
+    if (incidentNum) {
+      incidentHtml = `<div class="msg-incident"><a href="https://sitrep.fireandemergency.nz/report/${esc(incidentNum)}" target="_blank" rel="noopener" class="incident-link">${esc(incidentNum)}</a></div>`;
+    }
+
+    // Location
     let metaHtml = '';
     if (msg.location) metaHtml += `<span class="msg-meta-item">&#x1f4cd; ${esc(msg.location)}</span>`;
-    if (msg.trucks) metaHtml += `<span class="msg-meta-item">&#x1f692; ${esc(msg.trucks)}</span>`;
 
     card.innerHTML = `
       <div class="msg-header">${headerHtml}</div>
-      <div class="msg-content">${esc(msg.content)}</div>
+      ${trucksHtml}
+      <div class="msg-content">${esc(displayContent)}</div>
       ${metaHtml ? `<div class="msg-meta">${metaHtml}</div>` : ''}
+      ${incidentHtml}
     `;
 
-    card.addEventListener('click', () => showDetail(msg));
+    // Click handlers
+    card.addEventListener('click', (e) => {
+      // Don't trigger detail if clicking a link or admin capcode
+      if (e.target.closest('.incident-link') || e.target.closest('.msg-capcode-admin')) return;
+      showDetail(msg);
+    });
+
+    // Admin: click capcode to edit alias
+    if (isAdmin) {
+      const capcodeEl = card.querySelector('.msg-capcode-admin');
+      if (capcodeEl) {
+        capcodeEl.addEventListener('click', (e) => {
+          e.stopPropagation();
+          showAliasModal(msg.capcode);
+        });
+      }
+    }
+
     return card;
   }
 
@@ -150,18 +205,31 @@
     const content = $('#detail-content');
     const alias = state.aliases[msg.capcode];
     const aliasName = alias ? alias.alias : msg.alias || null;
+    const aliasNotes = alias ? alias.notes : msg.alias_notes || null;
+    const incidentNum = msg.incident_number || extractIncidentNumber(msg.content);
+    const isAdmin = state.user && state.user.role === 'admin';
+
+    let capcodeHtml = `<span class="mono">${esc(msg.capcode)}</span>`;
+    if (isAdmin) capcodeHtml += ` <button class="btn btn-sm" id="detail-edit-alias">Edit Alias</button>`;
 
     content.innerHTML = `
-      <div class="detail-row"><div class="detail-label">Capcode</div><div class="detail-value mono">${esc(msg.capcode)}</div></div>
-      ${aliasName ? `<div class="detail-row"><div class="detail-label">Alias</div><div class="detail-value">${esc(aliasName)}</div></div>` : ''}
+      <div class="detail-row"><div class="detail-label">Capcode</div><div class="detail-value">${capcodeHtml}</div></div>
+      ${aliasName ? `<div class="detail-row"><div class="detail-label">Alias</div><div class="detail-value">${esc(aliasName)}${aliasNotes ? ` <span style="color:var(--text-muted);font-size:0.8rem">(${esc(aliasNotes)})</span>` : ''}</div></div>` : ''}
+      ${msg.trucks ? `<div class="detail-row"><div class="detail-label">Trucks/Units</div><div class="detail-value" style="font-weight:700">${esc(msg.trucks)}</div></div>` : ''}
       <div class="detail-row"><div class="detail-label">Content</div><div class="detail-value">${esc(msg.content)}</div></div>
       ${msg.call_type ? `<div class="detail-row"><div class="detail-label">Call Type</div><div class="detail-value"><span class="msg-badge" style="background:${CALL_TYPE_COLOURS[msg.call_type] || '#6b7280'}">${esc(msg.call_type)}</span></div></div>` : ''}
       ${msg.location ? `<div class="detail-row"><div class="detail-label">Location</div><div class="detail-value">${esc(msg.location)}</div></div>` : ''}
-      ${msg.trucks ? `<div class="detail-row"><div class="detail-label">Trucks/Units</div><div class="detail-value">${esc(msg.trucks)}</div></div>` : ''}
+      ${incidentNum ? `<div class="detail-row"><div class="detail-label">Incident</div><div class="detail-value"><a href="https://sitrep.fireandemergency.nz/report/${esc(incidentNum)}" target="_blank" rel="noopener" class="incident-link">${esc(incidentNum)}</a></div></div>` : ''}
       <div class="detail-row"><div class="detail-label">Protocol</div><div class="detail-value">${esc(msg.protocol)}${msg.bitrate ? ' / ' + msg.bitrate + ' baud' : ''}</div></div>
       <div class="detail-row"><div class="detail-label">Received</div><div class="detail-value">${esc(formatDateTime(msg.received_at))}</div></div>
       ${msg.raw ? `<div class="detail-row"><div class="detail-label">Raw</div><div class="detail-value mono" style="font-size:0.75rem;word-break:break-all">${esc(msg.raw)}</div></div>` : ''}
     `;
+
+    // Admin: edit alias button
+    if (isAdmin) {
+      const editBtn = content.querySelector('#detail-edit-alias');
+      if (editBtn) editBtn.onclick = () => { hideDetail(); showAliasModal(msg.capcode); };
+    }
 
     panel.classList.remove('hidden');
     requestAnimationFrame(() => panel.classList.add('visible'));
@@ -246,20 +314,18 @@
     // Check if message passes current filters
     if (!matchesFilters(msg)) return;
 
-    state.messages.push(msg);
+    // Add to front of array (newest first)
+    state.messages.unshift(msg);
     if (state.messages.length > state.maxLiveMessages) {
-      state.messages.shift();
+      state.messages.pop();
       const list = $('#message-list');
-      if (list.firstChild) list.removeChild(list.firstChild);
+      if (list.lastChild) list.removeChild(list.lastChild);
     }
 
+    // Prepend to top of list (newest at top)
     const list = $('#message-list');
     const card = renderMessageCard(msg);
-    list.appendChild(card);
-
-    if (state.autoScroll) {
-      list.scrollTop = list.scrollHeight;
-    }
+    list.insertBefore(card, list.firstChild);
   }
 
   function matchesFilters(msg) {
@@ -269,6 +335,10 @@
     const location = $('#filter-location').value.toLowerCase();
     const trucks = $('#filter-trucks').value.toLowerCase();
     const groupId = $('#filter-group').value;
+    const hideTest = $('#filter-hide-test') && $('#filter-hide-test').checked;
+
+    // Hide test pages by default
+    if (hideTest && msg.call_type === 'TEST') return false;
 
     if (search && !(msg.content || '').toLowerCase().includes(search)) return false;
     if (callType && msg.call_type !== callType) return false;
@@ -317,14 +387,18 @@
 
   async function loadRecentMessages() {
     try {
-      const msgs = await api('/api/messages?limit=100');
+      const params = new URLSearchParams({ limit: '100' });
+      if ($('#filter-hide-test') && $('#filter-hide-test').checked) {
+        params.set('exclude_call_type', 'TEST');
+      }
+      const msgs = await api('/api/messages?' + params.toString());
       const list = $('#message-list');
       list.innerHTML = '';
-      state.messages = msgs.reverse();
+      // API returns newest first - that's our display order
+      state.messages = msgs;
       for (const msg of state.messages) {
         list.appendChild(renderMessageCard(msg));
       }
-      list.scrollTop = list.scrollHeight;
     } catch (err) {
       toast('Failed to load messages', 'error');
     }
@@ -448,21 +522,23 @@
         const location = $('#filter-location').value;
         const trucks = $('#filter-trucks').value;
         const groupId = $('#filter-group').value;
+        const hideTest = $('#filter-hide-test') && $('#filter-hide-test').checked;
         if (search) params.set('search', search);
         if (callType) params.set('call_type', callType);
         if (capcode) params.set('capcode', capcode);
         if (location) params.set('location', location);
         if (trucks) params.set('trucks', trucks);
         if (groupId) params.set('group_id', groupId);
+        if (hideTest) params.set('exclude_call_type', 'TEST');
 
         const msgs = await api('/api/messages?' + params.toString());
         const list = $('#message-list');
         list.innerHTML = '';
-        state.messages = msgs.reverse();
+        // Newest first (API returns newest first)
+        state.messages = msgs;
         for (const msg of state.messages) {
           list.appendChild(renderMessageCard(msg));
         }
-        list.scrollTop = list.scrollHeight;
       } catch (err) {
         toast('Filter error: ' + err.message, 'error');
       }
@@ -767,16 +843,27 @@
 
   async function showAliasModal(editCapcode) {
     let alias = null;
+    let aliasGroups = [];
     if (editCapcode) {
       const aliases = await api('/api/aliases');
       alias = aliases.find(a => a.capcode === editCapcode);
+      if (alias && alias.groups) aliasGroups = alias.groups.map(g => g.group_id);
     }
-    showModal(editCapcode ? 'Edit Alias' : 'Add Alias', `
-      <div class="form-group"><label>Capcode</label><input type="text" id="alias-capcode" value="${esc(alias ? alias.capcode : '')}" ${editCapcode ? 'readonly' : ''}></div>
-      <div class="form-group"><label>Alias Name</label><input type="text" id="alias-name" value="${esc(alias ? alias.alias : '')}"></div>
+
+    // Build group checkboxes
+    const groupCheckboxes = state.groups.map(g => {
+      const checked = aliasGroups.includes(g.id) ? 'checked' : '';
+      return `<label class="checkbox-label"><input type="checkbox" value="${g.id}" class="alias-group-cb" ${checked}> <span class="colour-dot" style="background:${esc(g.colour)}"></span>${esc(g.name)}</label>`;
+    }).join('');
+
+    showModal(editCapcode && alias ? 'Edit Alias' : (editCapcode ? 'Add Alias for ' + editCapcode : 'Add Alias'), `
+      <div class="form-group"><label>Capcode</label><input type="text" id="alias-capcode" value="${esc(editCapcode || (alias ? alias.capcode : ''))}" ${editCapcode ? 'readonly' : ''}></div>
+      <div class="form-group"><label>Alias Name (e.g. truck/unit name)</label><input type="text" id="alias-name" value="${esc(alias ? alias.alias : '')}" placeholder="e.g. MATAFRU, TAUP217"></div>
+      <div class="form-group"><label>Notes</label><input type="text" id="alias-notes" value="${esc(alias ? alias.notes || '' : '')}" placeholder="e.g. Matamata Rural Fire Unit"></div>
       <div class="form-group"><label>Colour</label><input type="color" id="alias-colour" value="${alias ? alias.colour : '#6b7280'}" style="width:60px;height:32px;padding:2px"></div>
       <div class="form-group"><label>Default Call Type</label><input type="text" id="alias-calltype" value="${esc(alias ? alias.call_type || '' : '')}" placeholder="e.g. AMBO, MIN"></div>
       <div class="form-group"><label>Default Location</label><input type="text" id="alias-location" value="${esc(alias ? alias.location || '' : '')}" placeholder="e.g. Wellington"></div>
+      <div class="form-group"><label>Groups</label><div class="checkbox-group">${groupCheckboxes || '<span style="color:var(--text-muted);font-size:0.8rem">No groups created yet</span>'}</div></div>
     `, `
       <button class="btn" id="modal-cancel">Cancel</button>
       <button class="btn btn-primary" id="modal-save">Save</button>
@@ -786,19 +873,29 @@
       const capcode = $('#alias-capcode').value.trim();
       const name = $('#alias-name').value.trim();
       if (!capcode || !name) return toast('Capcode and alias required', 'error');
+
+      // Collect selected groups
+      const groupIds = Array.from($$('.alias-group-cb:checked')).map(cb => parseInt(cb.value, 10));
+
       try {
         await api('/api/aliases', {
           method: 'POST',
           body: JSON.stringify({
             capcode,
             alias: name,
+            notes: $('#alias-notes').value.trim() || null,
             colour: $('#alias-colour').value,
             call_type: $('#alias-calltype').value.trim() || null,
             location: $('#alias-location').value.trim() || null,
+            group_ids: groupIds,
           })
         });
+        // Refresh aliases in state
+        const updatedAliases = await api('/api/aliases');
+        state.aliases = {};
+        for (const a of updatedAliases) state.aliases[a.capcode] = a;
         hideModal();
-        loadAdminTab('aliases');
+        if (state.currentView === 'admin') loadAdminTab('aliases');
         toast('Alias saved', 'success');
       } catch (err) {
         toast(err.message, 'error');
@@ -1013,6 +1110,86 @@
 
     connectWs();
     await loadInitialData();
+
+    // Show first-login disclaimer if not yet accepted
+    if (!localStorage.getItem('pdw_disclaimer_accepted')) {
+      showDisclaimerModal();
+    }
+  }
+
+  function showDisclaimerModal() {
+    const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+    const isAndroid = /Android/.test(navigator.userAgent);
+
+    let installInstructions = '';
+    if (isIOS) {
+      installInstructions = `
+        <li>Tap the <strong>Share</strong> button (box with arrow) in Safari</li>
+        <li>Scroll down and tap <strong>"Add to Home Screen"</strong></li>
+        <li>Tap <strong>"Add"</strong> to confirm</li>
+      `;
+    } else if (isAndroid) {
+      installInstructions = `
+        <li>Tap the <strong>menu</strong> (three dots) in Chrome</li>
+        <li>Tap <strong>"Add to Home screen"</strong> or <strong>"Install app"</strong></li>
+        <li>Tap <strong>"Install"</strong> to confirm</li>
+      `;
+    } else {
+      installInstructions = `
+        <li>In Chrome: click the <strong>install icon</strong> in the address bar (or Menu > "Install PDW Monitor")</li>
+        <li>In Edge: click <strong>Menu > Apps > Install this site as an app</strong></li>
+        <li>In Firefox: bookmark the page for quick access</li>
+      `;
+    }
+
+    showModal('Welcome to PDW Monitor', `
+      <div style="margin-bottom:1rem">
+        <h4 style="color:var(--warning);margin-bottom:0.5rem">Important Notice</h4>
+        <p style="font-size:0.85rem;line-height:1.5;color:var(--text-dim)">
+          This system monitors emergency services pager traffic for informational purposes only.
+          By using this system you agree that you will:
+        </p>
+        <ul style="font-size:0.85rem;line-height:1.6;color:var(--text-dim);margin:0.5rem 0 0 1.25rem">
+          <li><strong>Not act on</strong> any information received through this system</li>
+          <li><strong>Not share</strong> specific operational details publicly</li>
+          <li><strong>Not attend</strong> emergency scenes based on this information</li>
+          <li><strong>Not interfere</strong> with emergency services operations</li>
+        </ul>
+      </div>
+      <div style="margin-bottom:1rem">
+        <h4 style="margin-bottom:0.5rem">Install as App</h4>
+        <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.375rem">For the best experience, install PDW Monitor as a web app:</p>
+        <ol style="font-size:0.85rem;line-height:1.6;color:var(--text-dim);margin:0 0 0 1.25rem">${installInstructions}</ol>
+      </div>
+      <div>
+        <h4 style="margin-bottom:0.5rem">Notifications</h4>
+        <p style="font-size:0.85rem;line-height:1.5;color:var(--text-dim)">
+          To receive push notifications for specific groups:
+        </p>
+        <ol style="font-size:0.85rem;line-height:1.6;color:var(--text-dim);margin:0 0 0 1.25rem">
+          <li>Click the <strong>bell icon</strong> in the top bar to enable notifications</li>
+          <li>Allow notifications when prompted by your browser</li>
+          <li>Add groups to your <strong>Favourites</strong> in the sidebar (with the bell enabled)</li>
+          <li>You'll receive a push notification whenever a page matches your favourited groups</li>
+        </ol>
+      </div>
+    `, `
+      <button class="btn btn-primary" id="modal-accept-disclaimer">I Understand and Agree</button>
+    `);
+
+    const cancelBtn = $('#modal-close');
+    const origClose = cancelBtn.onclick;
+    // Prevent closing without accepting
+    cancelBtn.onclick = null;
+    $('#modal-overlay').onclick = null;
+
+    $('#modal-accept-disclaimer').onclick = () => {
+      localStorage.setItem('pdw_disclaimer_accepted', '1');
+      hideModal();
+      // Restore normal close behaviour
+      cancelBtn.onclick = origClose;
+      $('#modal-overlay').addEventListener('click', (e) => { if (e.target === e.currentTarget) hideModal(); });
+    };
   }
 
   // ─── Filter debounce ───
@@ -1056,6 +1233,16 @@
     // Notifications
     $('#btn-notifications').addEventListener('click', enableNotifications);
 
+    // Mobile search toggle
+    $('#btn-search-toggle').addEventListener('click', () => {
+      const bar = $('#search-bar');
+      bar.classList.toggle('hidden-mobile');
+      bar.classList.toggle('show-mobile');
+      if (bar.classList.contains('show-mobile')) {
+        $('#filter-search').focus();
+      }
+    });
+
     // Filters
     $('#filter-search').addEventListener('input', onFilterChange);
     $('#filter-call-type').addEventListener('change', onFilterChange);
@@ -1063,6 +1250,7 @@
     $('#filter-location').addEventListener('input', onFilterChange);
     $('#filter-trucks').addEventListener('input', onFilterChange);
     $('#filter-group').addEventListener('change', onFilterChange);
+    $('#filter-hide-test').addEventListener('change', onFilterChange);
     $('#btn-clear-filters').addEventListener('click', () => {
       $('#filter-search').value = '';
       $('#filter-call-type').value = '';
@@ -1070,6 +1258,7 @@
       $('#filter-location').value = '';
       $('#filter-trucks').value = '';
       $('#filter-group').value = '';
+      $('#filter-hide-test').checked = true;
       applyFilters();
     });
     $('#btn-save-filter').addEventListener('click', showSaveFilterModal);

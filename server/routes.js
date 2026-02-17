@@ -144,6 +144,7 @@ router.get('/api/messages', requireAuth, (req, res) => {
     offset = 0,
     capcode,
     call_type,
+    exclude_call_type,
     location,
     trucks,
     group_id,
@@ -167,6 +168,10 @@ router.get('/api/messages', requireAuth, (req, res) => {
   if (call_type) {
     conditions.push('m.call_type = ?');
     params.push(call_type);
+  }
+  if (exclude_call_type) {
+    conditions.push('(m.call_type IS NULL OR m.call_type != ?)');
+    params.push(exclude_call_type);
   }
   if (location) {
     conditions.push('m.location LIKE ?');
@@ -284,17 +289,34 @@ router.delete('/api/groups/:id', requireAuth, requireAdmin, (req, res) => {
 
 router.get('/api/aliases', requireAuth, (req, res) => {
   const aliases = db.prepare('SELECT * FROM capcode_aliases ORDER BY capcode').all();
+  // Attach group memberships for each alias
+  const groupStmt = db.prepare('SELECT gm.group_id, g.name FROM group_members gm JOIN groups_ g ON gm.group_id = g.id WHERE gm.capcode = ?');
+  for (const a of aliases) {
+    a.groups = groupStmt.all(a.capcode);
+  }
   res.json(aliases);
 });
 
 router.post('/api/aliases', requireAuth, requireAdmin, (req, res) => {
-  const { capcode, alias, colour, icon, call_type, location } = req.body;
+  const { capcode, alias, colour, icon, call_type, location, notes, group_ids } = req.body;
   if (!capcode || !alias) return res.status(400).json({ error: 'Capcode and alias required' });
   try {
     db.prepare(
-      'INSERT INTO capcode_aliases (capcode, alias, colour, icon, call_type, location) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(capcode) DO UPDATE SET alias=?, colour=?, icon=?, call_type=?, location=?'
-    ).run(capcode, alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null,
-      alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null);
+      'INSERT INTO capcode_aliases (capcode, alias, colour, icon, call_type, location, notes) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(capcode) DO UPDATE SET alias=?, colour=?, icon=?, call_type=?, location=?, notes=?'
+    ).run(capcode, alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null,
+      alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null);
+
+    // Update group memberships if provided
+    if (Array.isArray(group_ids)) {
+      // Remove capcode from all groups first
+      db.prepare('DELETE FROM group_members WHERE capcode = ?').run(capcode);
+      // Add to specified groups
+      const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
+      for (const gid of group_ids) {
+        insert.run(parseInt(gid, 10), capcode);
+      }
+    }
+
     res.json({ ok: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save alias' });
@@ -441,6 +463,13 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
         insertedMsg.alias = alias.alias;
         insertedMsg.alias_colour = alias.colour;
         insertedMsg.alias_icon = alias.icon;
+        insertedMsg.alias_notes = alias.notes;
+      }
+
+      // Add incident number if present
+      const incidentNum = parser.extractIncidentNumber(msg.content);
+      if (incidentNum) {
+        insertedMsg.incident_number = incidentNum;
       }
 
       inserted.push(insertedMsg);

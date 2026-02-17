@@ -116,4 +116,12 @@ db.exec(`
   );
 `);
 
+// ─── Migrations ───
+// Add notes column to capcode_aliases if it doesn't exist
+try {
+  db.exec("ALTER TABLE capcode_aliases ADD COLUMN notes TEXT");
+} catch (e) {
+  // Column already exists, ignore
+}
+
 module.exports = db;

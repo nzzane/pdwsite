@@ -42,9 +42,10 @@ const LOCATION_PATTERNS = [
 ];
 
 /**
- * Truck/unit extraction pattern.
+ * Incident number pattern (FENZ sitrep).
+ * Matches #F1234567 or F1234567 (F followed by 6+ digits).
  */
-const TRUCK_PATTERN = /\b([A-Z]{2,4}\d{3,4}|[A-Z]+\s*\d+)\b/g;
+const INCIDENT_PATTERN = /#?(F\d{6,})\b/;
 
 /**
  * Detect call type from message content.
@@ -79,15 +80,44 @@ function extractLocation(content) {
 }
 
 /**
+ * Extract FENZ incident number from message content.
+ * e.g. #F4403574 → F4403574
+ */
+function extractIncidentNumber(content) {
+  if (!content) return null;
+  const m = content.match(INCIDENT_PATTERN);
+  return m ? m[1] : null;
+}
+
+/**
  * Extract truck/unit identifiers from message content.
+ * Handles:
+ *   - Parenthesized list at start: (TAUP217, RFOTLL, RFOMFM1)
+ *   - Individual codes: letters+digits like TAUP217, RFOMFM1
  */
 function extractTrucks(content) {
   if (!content) return null;
-  const matches = content.match(TRUCK_PATTERN);
-  if (!matches) return null;
-  // Filter out things that look like capcodes (pure numbers)
-  const trucks = matches.filter((m) => /[A-Z]/.test(m));
-  return trucks.length > 0 ? trucks.join(', ') : null;
+
+  // Pattern 1: Parenthesized list at start of message
+  const parenMatch = content.match(/^\(([^)]+)\)/);
+  if (parenMatch) {
+    return parenMatch[1].split(/,\s*/).map(s => s.trim()).filter(Boolean).join(', ');
+  }
+
+  // Pattern 2: Individual truck codes (3+ letters followed by 1-4 digits)
+  const codePattern = /\b([A-Z]{3,}\d{1,4})\b/g;
+  const exclude = /^(MIN|SH|RED|RESP|EOT|ETX|STX|POCSAG|FLEX)\d/i;
+  const matches = [];
+  let m;
+  while ((m = codePattern.exec(content)) !== null) {
+    const code = m[1];
+    // Skip incident numbers (F followed by 6+ digits)
+    if (/^F\d{6,}$/.test(code)) continue;
+    // Skip known non-truck prefixes
+    if (exclude.test(code)) continue;
+    matches.push(code);
+  }
+  return matches.length > 0 ? matches.join(', ') : null;
 }
 
 /**
@@ -256,6 +286,7 @@ function enrichMessage(parsed) {
     call_type: detectCallType(parsed.content),
     location: extractLocation(parsed.content),
     trucks: extractTrucks(parsed.content),
+    incident_number: extractIncidentNumber(parsed.content),
     hash: dedupeHash(parsed.capcode, parsed.content),
   };
 }
@@ -266,6 +297,7 @@ module.exports = {
   getCallTypeColour,
   extractLocation,
   extractTrucks,
+  extractIncidentNumber,
   dedupeHash,
   isDuplicate,
   parseMultipart,
