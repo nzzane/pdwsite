@@ -31,19 +31,6 @@ services:
       - MULTIPART_TIMEOUT_MS=${MULTIPART_TIMEOUT_MS:-10000}
       - NODE_ENV=production
 
-    # ── Networking ──
-    # Join your reverse proxy network so SWAG/Nginx can reach this container
-    # by name (pdw-monitor). Create the network first if it doesn't exist:
-    #   docker network create proxynet
-    # Then in your SWAG docker-compose.yml, also add:
-    #   networks:
-    #     - proxynet  (under the swag service)
-    #   networks:
-    #     proxynet:
-    #       external: true  (at the top level)
-    networks:
-      - proxynet
-
     # Health check (mirrors Dockerfile HEALTHCHECK but compose-level gives
     # more control for orchestration / depends_on with condition)
     healthcheck:
