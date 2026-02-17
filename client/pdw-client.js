@@ -24,7 +24,7 @@ const crypto = require('crypto');
 // ─── Configuration ───
 const CONFIG = {
   SERVER_URL: process.env.SERVER_URL || 'http://localhost:3000',
-  API_KEY: process.env.API_KEY || 'change-me-pdw-api-key',
+  API_KEY: process.env.API_KEY || '',
 
   // RTL-SDR settings
   RTL_FREQUENCY: process.env.RTL_FREQUENCY || '157.925M',  // NZ pager frequency - adjust as needed
@@ -290,6 +290,12 @@ function start() {
   console.log('=== PDW Client ===');
   console.log(`Server: ${CONFIG.SERVER_URL}`);
   console.log(`Decoders: ${CONFIG.DECODERS.join(', ')}`);
+
+  if (!CONFIG.API_KEY) {
+    console.error('ERROR: API_KEY is not set.');
+    console.error('Get it from: Admin Panel > Settings, or: docker exec pdw-monitor cat /data/.api-key');
+    process.exit(1);
+  }
 
   if (CONFIG.READ_STDIN) {
     console.log('Reading from stdin (pipe multimon-ng output to this script)');

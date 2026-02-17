@@ -79,16 +79,20 @@ The server runs on `http://localhost:3000` by default.
 
 ### 4. Start the client script (on the RTL-SDR machine)
 
-```bash
-API_KEY=your-api-key SERVER_URL=http://your-server:3000 npm run client
-```
-
-Or pipe multimon-ng output directly:
+The client runs on the machine with the RTL-SDR dongle (not inside Docker).
 
 ```bash
-rtl_fm -f 157.925M -g 40 -s 22050 - | multimon-ng -t raw -a POCSAG512 -a POCSAG1200 -a FLEX - | \
-  API_KEY=your-key SERVER_URL=http://your-server:3000 READ_STDIN=1 node client/pdw-client.js
+# Get your API key from the server first:
+#   Admin Panel > Settings tab, or:
+#   docker exec pdw-monitor cat /data/.api-key
+
+API_KEY=your-api-key \
+SERVER_URL=http://your-server:3000 \
+RTL_FREQUENCY=157.925M \
+  ./client/start-client.sh
 ```
+
+This launches the `rtl_fm | multimon-ng | node` pipeline in a single shell script. See `client/start-client.sh` for all configurable options.
 
 ## Docker Deployment (Recommended)
 
@@ -162,11 +166,17 @@ PDW_PORT=8080 docker compose up -d
 
 ### Client script connection
 
-On the RTL-SDR machine (does NOT run in Docker - needs hardware access):
+On the RTL-SDR machine (does NOT run in Docker — needs hardware access):
 
 ```bash
-API_KEY=your-api-key SERVER_URL=http://docker-host:3000 node client/pdw-client.js
+# Requires: rtl-sdr, multimon-ng, node
+API_KEY=your-api-key \
+SERVER_URL=http://docker-host:3000 \
+RTL_FREQUENCY=157.925M \
+  ./client/start-client.sh
 ```
+
+The shell script handles the `rtl_fm | multimon-ng` pipe and feeds decoded output to the Node.js client via stdin. It validates dependencies and the API key before starting.
 
 ## Mobile Installation (PWA)
 
