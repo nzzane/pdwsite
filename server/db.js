@@ -136,6 +136,13 @@ db.exec(`
   );
 `);
 
+// Add min_alarm_level column to users for alarm level alerts
+try {
+  db.exec("ALTER TABLE users ADD COLUMN min_alarm_level INTEGER DEFAULT NULL");
+} catch (e) {
+  // Column already exists, ignore
+}
+
 // Normalize capcodes: strip leading zeros for consistent matching across FLEX/POCSAG
 try {
   db.exec("UPDATE group_members SET capcode = CASE WHEN LENGTH(LTRIM(capcode, '0')) = 0 THEN '0' ELSE LTRIM(capcode, '0') END WHERE capcode LIKE '0%'");

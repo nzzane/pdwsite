@@ -212,6 +212,8 @@ router.get('/api/messages', requireAuth, (req, res) => {
     }
     const incidentNum = parser.extractIncidentNumber(msg.content);
     if (incidentNum) msg.incident_number = incidentNum;
+    const alarmLvl = parser.extractAlarmLevel(msg.content);
+    if (alarmLvl) msg.alarm_level = alarmLvl;
   }
 
   res.json(messages);
@@ -467,6 +469,23 @@ router.post('/api/push/test', requireAuth, (req, res) => {
   });
 });
 
+// ─── Alarm level alerts ───
+
+router.get('/api/alarm-level-alert', requireAuth, (req, res) => {
+  const user = db.prepare('SELECT min_alarm_level FROM users WHERE id = ?').get(req.user.id);
+  res.json({ min_alarm_level: user ? user.min_alarm_level : null });
+});
+
+router.put('/api/alarm-level-alert', requireAuth, (req, res) => {
+  const { min_alarm_level } = req.body;
+  const level = min_alarm_level ? parseInt(min_alarm_level, 10) : null;
+  if (level !== null && (level < 2 || level > 5)) {
+    return res.status(400).json({ error: 'Alarm level must be between 2 and 5' });
+  }
+  db.prepare('UPDATE users SET min_alarm_level = ? WHERE id = ?').run(level, req.user.id);
+  res.json({ ok: true, min_alarm_level: level });
+});
+
 // ─── Ingestion endpoint (called by client script) ───
 
 router.post('/api/ingest', requireApiKey, (req, res) => {
@@ -535,6 +554,12 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
       const priority = parser.extractPriority(msg.content);
       if (priority) {
         insertedMsg.priority = priority;
+      }
+
+      // Add alarm level if present (multi-alarm fires)
+      const alarmLevel = parser.extractAlarmLevel(msg.content);
+      if (alarmLevel) {
+        insertedMsg.alarm_level = alarmLevel;
       }
 
       inserted.push(insertedMsg);
@@ -649,6 +674,36 @@ function sendPushForMessage(msg) {
     });
 
     sendToSubscriptions(subs, payload);
+  }
+
+  // ─── Alarm level notifications ───
+  const alarmLevel = parser.extractAlarmLevel(msg.content);
+  if (alarmLevel) {
+    // Find all users whose min_alarm_level is <= the message's alarm level
+    const alarmUsers = db.prepare(
+      'SELECT DISTINCT u.id FROM users u WHERE u.min_alarm_level IS NOT NULL AND u.min_alarm_level <= ?'
+    ).all(alarmLevel);
+
+    for (const user of alarmUsers) {
+      // Skip if user already notified via group or keyword
+      const alreadyNotified = matchedUsers.has(user.id) ||
+        (groups.length > 0 && db.prepare(
+          `SELECT 1 FROM user_favourites WHERE user_id = ? AND group_id IN (${groups.map(() => '?').join(',')}) AND notify = 1 LIMIT 1`
+        ).get(user.id, ...groups.map(g => g.id)));
+      if (alreadyNotified) continue;
+
+      const subs = db.prepare('SELECT endpoint, keys_json FROM push_subscriptions WHERE user_id = ?').all(user.id);
+      if (subs.length === 0) continue;
+
+      const ordinal = alarmLevel === 2 ? '2nd' : alarmLevel === 3 ? '3rd' : `${alarmLevel}th`;
+      const payload = JSON.stringify({
+        title: `PDW: ${ordinal} Alarm!`,
+        body: msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`,
+        data: { messageId: msg.id, capcode: msg.capcode, alarmLevel },
+      });
+
+      sendToSubscriptions(subs, payload);
+    }
   }
 }
 

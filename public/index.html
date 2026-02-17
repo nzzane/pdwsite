@@ -117,6 +117,19 @@
         <button id="btn-add-keyword" class="btn btn-sm btn-secondary" style="margin-top:0.375rem;width:100%">+ Add Alert</button>
       </div>
       <div class="sidebar-section">
+        <h3>Alarm Level Alerts</h3>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin:0 0.625rem 0.375rem">Get alerted on multi-alarm fires</p>
+        <div style="padding:0 0.625rem">
+          <select id="alarm-level-select" class="filter-select" style="width:100%">
+            <option value="">Off</option>
+            <option value="2">2nd Alarm and above</option>
+            <option value="3">3rd Alarm and above</option>
+            <option value="4">4th Alarm and above</option>
+            <option value="5">5th Alarm only</option>
+          </select>
+        </div>
+      </div>
+      <div class="sidebar-section">
         <h3>Saved Filters</h3>
         <div id="sidebar-filters" class="nav-list"></div>
       </div>

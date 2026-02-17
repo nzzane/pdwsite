@@ -157,6 +157,21 @@ function normalizeCapcode(capcode) {
 }
 
 /**
+ * Extract alarm level from message content.
+ * NZ Fire multi-alarm fires: "2ND ALARM", "SECOND ALARM", "TX 2ND", etc.
+ * Returns the alarm level number (2-5+) or null.
+ */
+function extractAlarmLevel(content) {
+  if (!content) return null;
+  // Check highest level first so we return the max
+  if (/\b(?:5TH|FIFTH)\s*ALARM\b|\bTX\s+(?:5TH|FIFTH)\b/i.test(content)) return 5;
+  if (/\b(?:4TH|FOURTH)\s*ALARM\b|\bTX\s+(?:4TH|FOURTH)\b/i.test(content)) return 4;
+  if (/\b(?:3RD|THIRD)\s*ALARM\b|\bTX\s+(?:3RD|THIRD)\b/i.test(content)) return 3;
+  if (/\b(?:2ND|SECOND)\s*ALARM\b|\bTX\s+(?:2ND|SECOND)\b/i.test(content)) return 2;
+  return null;
+}
+
+/**
  * Generate a dedup hash for a message.
  */
 function dedupeHash(capcode, content) {
@@ -289,6 +304,22 @@ function parseMultimonLine(line) {
     };
   }
 
+  // POCSAG tone-only (no Alpha/Numeric/Tone content section)
+  // POCSAG1200: Address:  586505  Function: 0
+  const pocsagTone = line.match(
+    /^(POCSAG)(\d+):\s*Address:\s*(\d+)\s*Function:\s*(\d+)\s*$/i
+  );
+  if (pocsagTone) {
+    return {
+      protocol: 'POCSAG',
+      bitrate: parseInt(pocsagTone[2], 10),
+      capcode: pocsagTone[3],
+      function_code: parseInt(pocsagTone[4], 10),
+      content: '[Tone]',
+      raw: line,
+    };
+  }
+
   // FLEX format: 7-field pipe-delimited (standard multimon-ng FLEX output)
   // FLEX|2026-02-17 17:52:07|1600/2/K/A|13.013|001234567|ALN|Message text
   const flex7 = line.match(
@@ -389,6 +420,7 @@ module.exports = {
   extractTrucks,
   extractIncidentNumber,
   extractPriority,
+  extractAlarmLevel,
   normalizeCapcode,
   dedupeHash,
   isDuplicate,

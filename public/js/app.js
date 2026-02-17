@@ -22,6 +22,7 @@
     keywordAlerts: [],
     searchPage: 0,
     searchLimit: 50,
+    alarmLevelSetting: null, // null = off, 2-5 = minimum alarm level
   };
 
   // ─── Call type categories ───
@@ -189,6 +190,16 @@
       }
     }
 
+    // Check alarm level alerts
+    if (!matched && state.alarmLevelSetting) {
+      const alarmLevel = msg.alarm_level || extractAlarmLevel(msg.content);
+      if (alarmLevel && alarmLevel >= state.alarmLevelSetting) {
+        matched = true;
+        const ordinal = alarmLevel === 2 ? '2nd' : alarmLevel === 3 ? '3rd' : `${alarmLevel}th`;
+        matchReason = `${ordinal} Alarm`;
+      }
+    }
+
     if (matched) {
       playAlertSound();
       toast(`Alert [${matchReason}]: ${(msg.content || '').substring(0, 100)}`, 'info');
@@ -200,6 +211,16 @@
     if (!content) return null;
     const m = content.match(/\b(PURPLE|RED|ORANGE|GREEN)\s+\d/i);
     return m ? m[1].toUpperCase() : null;
+  }
+
+  // ─── Extract alarm level (multi-alarm fires) ───
+  function extractAlarmLevel(content) {
+    if (!content) return null;
+    if (/\b(?:5TH|FIFTH)\s*ALARM\b|\bTX\s+(?:5TH|FIFTH)\b/i.test(content)) return 5;
+    if (/\b(?:4TH|FOURTH)\s*ALARM\b|\bTX\s+(?:4TH|FOURTH)\b/i.test(content)) return 4;
+    if (/\b(?:3RD|THIRD)\s*ALARM\b|\bTX\s+(?:3RD|THIRD)\b/i.test(content)) return 3;
+    if (/\b(?:2ND|SECOND)\s*ALARM\b|\bTX\s+(?:2ND|SECOND)\b/i.test(content)) return 2;
+    return null;
   }
 
   // ─── Render a message card ───
@@ -454,13 +475,14 @@
   // ─── Load data ───
   async function loadInitialData() {
     try {
-      const [groups, favs, aliases, callTypes, filters, keywordAlerts] = await Promise.all([
+      const [groups, favs, aliases, callTypes, filters, keywordAlerts, alarmLevelData] = await Promise.all([
         api('/api/groups'),
         api('/api/favourites'),
         api('/api/aliases'),
         api('/api/messages/call-types'),
         api('/api/filters'),
         api('/api/keyword-alerts'),
+        api('/api/alarm-level-alert'),
       ]);
 
       state.groups = groups;
@@ -468,6 +490,11 @@
       state.callTypes = callTypes;
       state.filters = filters;
       state.keywordAlerts = keywordAlerts;
+      state.alarmLevelSetting = alarmLevelData.min_alarm_level || null;
+
+      // Sync alarm level dropdown
+      const alarmSelect = $('#alarm-level-select');
+      if (alarmSelect) alarmSelect.value = state.alarmLevelSetting || '';
 
       // Build alias map
       state.aliases = {};
@@ -1554,6 +1581,24 @@
     $('#btn-pause').addEventListener('click', () => {
       state.paused = !state.paused;
       $('#btn-pause').textContent = state.paused ? 'Resume' : 'Pause';
+    });
+
+    // Alarm level selector
+    $('#alarm-level-select').addEventListener('change', async (e) => {
+      const val = e.target.value ? parseInt(e.target.value, 10) : null;
+      try {
+        await api('/api/alarm-level-alert', { method: 'PUT', body: JSON.stringify({ min_alarm_level: val }) });
+        state.alarmLevelSetting = val;
+        if (val) {
+          const ordinal = val === 2 ? '2nd' : val === 3 ? '3rd' : `${val}th`;
+          toast(`Alarm level alerts enabled: ${ordinal} alarm and above`, 'success');
+        } else {
+          toast('Alarm level alerts disabled', 'info');
+        }
+      } catch (err) {
+        toast('Failed to update alarm level: ' + err.message, 'error');
+        e.target.value = state.alarmLevelSetting || '';
+      }
     });
 
     // Keyword alert add button

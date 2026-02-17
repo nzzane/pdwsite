@@ -184,6 +184,22 @@ function parseLine(line) {
     };
   }
 
+  // POCSAG tone-only (no Alpha/Numeric/Tone content section)
+  // POCSAG1200: Address:  586505  Function: 0
+  const pocsagTone = line.match(
+    /^(POCSAG)(\d+):\s*Address:\s*(\d+)\s*Function:\s*(\d+)\s*$/i
+  );
+  if (pocsagTone) {
+    return {
+      protocol: 'POCSAG',
+      bitrate: parseInt(pocsagTone[2], 10),
+      capcode: pocsagTone[3],
+      function_code: parseInt(pocsagTone[4], 10),
+      content: '[Tone]',
+      raw: line,
+    };
+  }
+
   // FLEX format: 7-field pipe-delimited (standard multimon-ng FLEX output)
   // FLEX|2026-02-17 17:52:07|1600/2/K/A|13.013|001234567|ALN|Message text
   const flex7 = line.match(
