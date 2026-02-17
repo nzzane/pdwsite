@@ -670,6 +670,47 @@
       } catch (err) {
         el.innerHTML = `<p>Error: ${esc(err.message)}</p>`;
       }
+    } else if (tab === 'settings') {
+      try {
+        const settings = await api('/api/admin/settings');
+        el.innerHTML = `
+          <div class="settings-section">
+            <h3 style="margin:0 0 0.5rem 0;font-size:1rem">API Key</h3>
+            <p style="font-size:0.85rem;color:var(--text-dim);margin:0 0 0.75rem 0">
+              This key is used by the PDW client script to authenticate when sending messages to the server.
+              Set the <code>X-API-Key</code> header to this value in your client.
+            </p>
+            <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+              <input type="text" id="settings-api-key" value="${esc(settings.api_key || '')}" readonly
+                style="flex:1;min-width:200px;font-family:monospace;font-size:0.85rem;padding:0.5rem;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--text)">
+              <button class="btn btn-sm" id="btn-copy-api-key">Copy</button>
+              <button class="btn btn-sm btn-danger" id="btn-regenerate-api-key">Regenerate</button>
+            </div>
+          </div>
+        `;
+        el.querySelector('#btn-copy-api-key').onclick = () => {
+          const input = el.querySelector('#settings-api-key');
+          navigator.clipboard.writeText(input.value).then(() => {
+            toast('API key copied to clipboard', 'success');
+          }).catch(() => {
+            input.select();
+            document.execCommand('copy');
+            toast('API key copied', 'success');
+          });
+        };
+        el.querySelector('#btn-regenerate-api-key').onclick = async () => {
+          if (!confirm('Regenerate the API key? Any existing clients using the old key will stop working until updated.')) return;
+          try {
+            const result = await api('/api/admin/settings/regenerate-api-key', { method: 'POST' });
+            el.querySelector('#settings-api-key').value = result.api_key;
+            toast('API key regenerated', 'success');
+          } catch (err) {
+            toast('Failed to regenerate: ' + err.message, 'error');
+          }
+        };
+      } catch (err) {
+        el.innerHTML = `<p>Error: ${esc(err.message)}</p>`;
+      }
     }
   }
 

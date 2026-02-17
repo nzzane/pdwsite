@@ -12,13 +12,14 @@ services:
       - pdw-data:/data
 
     environment:
-      # ── Required ──
-      - JWT_SECRET=${JWT_SECRET:?Set JWT_SECRET in .env}
-      - API_KEY=${API_KEY:?Set API_KEY in .env}
+      # ── Secrets (auto-generated on first run if not set) ──
+      - JWT_SECRET=${JWT_SECRET:-}
+      - API_KEY=${API_KEY:-}
 
       # ── Auto admin setup (first run only) ──
+      # Default: admin / changeme
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
 
       # ── Push notifications (auto-generated if not set) ──
       - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}

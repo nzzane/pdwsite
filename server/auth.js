@@ -34,11 +34,17 @@ function requireAdmin(req, res, next) {
 
 /**
  * Express middleware: requires valid API_KEY in X-API-Key header.
- * Used for the client ingestion endpoint.
+ * Checks DB settings first, falls back to config (env var).
  */
 function requireApiKey(req, res, next) {
   const key = req.headers['x-api-key'];
-  if (!key || key !== config.API_KEY) {
+  if (!key) return res.status(401).json({ error: 'Invalid API key' });
+
+  // Check DB setting first, fall back to env var
+  const row = db.prepare("SELECT value FROM settings WHERE key = 'api_key'").get();
+  const validKey = (row && row.value) || config.API_KEY;
+
+  if (key !== validKey) {
     return res.status(401).json({ error: 'Invalid API key' });
   }
   next();

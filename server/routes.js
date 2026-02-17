@@ -104,6 +104,38 @@ router.put('/api/admin/users/:id/role', requireAuth, requireAdmin, (req, res) =>
   res.json({ ok: true });
 });
 
+// ─── Admin: settings ───
+
+router.get('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
+  const rows = db.prepare("SELECT key, value FROM settings").all();
+  const settings = {};
+  for (const row of rows) {
+    settings[row.key] = row.value;
+  }
+  // If api_key not in DB yet, show the env var value
+  if (!settings.api_key) {
+    settings.api_key = config.API_KEY || '';
+  }
+  res.json(settings);
+});
+
+router.put('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
+  const { key, value } = req.body;
+  if (!key || typeof value !== 'string') return res.status(400).json({ error: 'Key and value required' });
+  // Only allow known settings keys
+  const allowedKeys = ['api_key'];
+  if (!allowedKeys.includes(key)) return res.status(400).json({ error: 'Unknown setting: ' + key });
+  db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')").run(key, value, value);
+  res.json({ ok: true });
+});
+
+router.post('/api/admin/settings/regenerate-api-key', requireAuth, requireAdmin, (req, res) => {
+  const crypto = require('crypto');
+  const newKey = 'pdw_' + crypto.randomBytes(24).toString('base64url');
+  db.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('api_key', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')").run(newKey, newKey);
+  res.json({ api_key: newKey });
+});
+
 // ─── Messages ───
 
 router.get('/api/messages', requireAuth, (req, res) => {
