@@ -47,6 +47,16 @@ app.use('/manifest.json', (req, res, next) => {
   next();
 });
 
+// No-cache headers for HTML/CSS/JS so browsers always get fresh UI
+app.use((req, res, next) => {
+  if (req.path.endsWith('.html') || req.path.endsWith('.css') || req.path.endsWith('.js') || req.path === '/') {
+    res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
+  }
+  next();
+});
+
 // Static files (PWA frontend)
 // maxAge 0 forces browsers to revalidate via ETag/If-None-Match on every request,
 // preventing stale cached JS/CSS after Docker rebuilds

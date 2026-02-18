@@ -1,15 +1,11 @@
-const CACHE_NAME = 'pdw-v8';
+const CACHE_NAME = 'pdw-v9';
 const STATIC_ASSETS = [
-  '/',
-  '/index.html',
-  '/css/app.css',
-  '/js/app.js',
   '/manifest.json',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
 ];
 
-// Install - cache static assets
+// Install - only cache icons and manifest (not HTML/CSS/JS so they always load fresh)
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => cache.addAll(STATIC_ASSETS))
@@ -27,7 +23,7 @@ self.addEventListener('activate', (event) => {
   self.clients.claim();
 });
 
-// Fetch - network first with cache fallback
+// Fetch - network first for everything; only fall back to cache for offline support
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
@@ -44,8 +40,8 @@ self.addEventListener('fetch', (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        // Update cache with fresh response
-        if (response.ok) {
+        // Only cache icons/manifest for offline use - not HTML/CSS/JS
+        if (response.ok && STATIC_ASSETS.some(a => url.pathname === a)) {
           const clone = response.clone();
           caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
         }
@@ -55,11 +51,10 @@ self.addEventListener('fetch', (event) => {
         // Fall back to cache on network failure
         caches.match(event.request).then((cached) => {
           if (cached) return cached;
-          // For navigation requests, try to serve cached index.html
+          // For navigation requests, try to serve cached index.html (if available)
           if (event.request.mode === 'navigate') {
             return caches.match('/index.html');
           }
-          // Return a proper error response instead of undefined
           return new Response('Offline', { status: 503, statusText: 'Service Unavailable' });
         })
       )

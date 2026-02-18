@@ -551,6 +551,67 @@ router.put('/api/alarm-level-alert', requireAuth, (req, res) => {
   res.json({ ok: true, min_alarm_level: level });
 });
 
+// ─── User preferences (default view) ───
+
+router.get('/api/preferences', requireAuth, (req, res) => {
+  const prefs = db.prepare('SELECT * FROM user_preferences WHERE user_id = ?').get(req.user.id);
+  res.json(prefs || { default_view: 'live', default_group_id: null, default_keyword: null });
+});
+
+router.put('/api/preferences', requireAuth, (req, res) => {
+  const { default_view, default_group_id, default_keyword } = req.body;
+  db.prepare(`
+    INSERT INTO user_preferences (user_id, default_view, default_group_id, default_keyword, updated_at)
+    VALUES (?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(user_id) DO UPDATE SET
+      default_view = excluded.default_view,
+      default_group_id = excluded.default_group_id,
+      default_keyword = excluded.default_keyword,
+      updated_at = datetime('now')
+  `).run(req.user.id, default_view || 'live', default_group_id || null, default_keyword || null);
+  res.json({ ok: true });
+});
+
+// ─── Notification log ───
+
+router.get('/api/notification-log', requireAuth, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  const logs = db.prepare(
+    'SELECT * FROM notification_log WHERE user_id = ? ORDER BY created_at DESC LIMIT ?'
+  ).all(req.user.id, limit);
+  res.json(logs);
+});
+
+router.delete('/api/notification-log', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM notification_log WHERE user_id = ?').run(req.user.id);
+  res.json({ ok: true });
+});
+
+// ─── Silenced capcodes ───
+
+router.get('/api/silenced-capcodes', requireAuth, (req, res) => {
+  const silenced = db.prepare('SELECT * FROM silenced_capcodes WHERE user_id = ? ORDER BY capcode').all(req.user.id);
+  res.json(silenced);
+});
+
+router.post('/api/silenced-capcodes', requireAuth, (req, res) => {
+  const { capcode } = req.body;
+  if (!capcode) return res.status(400).json({ error: 'Capcode required' });
+  const normCap = parser.normalizeCapcode(capcode);
+  try {
+    db.prepare('INSERT OR IGNORE INTO silenced_capcodes (user_id, capcode) VALUES (?, ?)').run(req.user.id, normCap);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to silence capcode' });
+  }
+});
+
+router.delete('/api/silenced-capcodes/:capcode', requireAuth, (req, res) => {
+  const normCap = parser.normalizeCapcode(req.params.capcode);
+  db.prepare('DELETE FROM silenced_capcodes WHERE user_id = ? AND capcode = ?').run(req.user.id, normCap);
+  res.json({ ok: true });
+});
+
 // ─── FLEX fragment filtering and incident dedup ───
 // FLEX group pages send the same message to multiple capcodes simultaneously.
 // multimon-ng outputs each capcode's portion separately, often with truncated
@@ -831,18 +892,25 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
 // ─── Keyword alerts ───
 
 router.get('/api/keyword-alerts', requireAuth, (req, res) => {
-  const alerts = db.prepare('SELECT * FROM keyword_alerts WHERE user_id = ? ORDER BY keyword').all(req.user.id);
+  const alerts = db.prepare(`
+    SELECT ka.*, g.name as group_name, g.colour as group_colour
+    FROM keyword_alerts ka
+    LEFT JOIN groups_ g ON ka.group_id = g.id
+    WHERE ka.user_id = ?
+    ORDER BY ka.keyword
+  `).all(req.user.id);
   res.json(alerts);
 });
 
 router.post('/api/keyword-alerts', requireAuth, (req, res) => {
-  const { keyword } = req.body;
+  const { keyword, group_id } = req.body;
   if (!keyword || !keyword.trim()) return res.status(400).json({ error: 'Keyword required' });
+  const groupId = group_id ? parseInt(group_id, 10) : null;
   try {
-    const result = db.prepare('INSERT INTO keyword_alerts (user_id, keyword) VALUES (?, ?)').run(
-      req.user.id, keyword.trim()
+    const result = db.prepare('INSERT INTO keyword_alerts (user_id, keyword, group_id) VALUES (?, ?, ?)').run(
+      req.user.id, keyword.trim(), groupId
     );
-    res.json({ id: result.lastInsertRowid, keyword: keyword.trim() });
+    res.json({ id: result.lastInsertRowid, keyword: keyword.trim(), group_id: groupId });
   } catch (err) {
     if (err.message && err.message.includes('UNIQUE')) {
       return res.status(409).json({ error: 'Keyword already exists' });
@@ -870,6 +938,7 @@ router.delete('/api/keyword-alerts/:id', requireAuth, (req, res) => {
 /**
  * Send push notifications to users who have favourited groups containing this capcode,
  * and to users with keyword alerts matching the message content.
+ * Respects per-user silenced capcodes and logs all sent notifications.
  */
 function sendPushForMessage(msg) {
   if (!config.VAPID_PUBLIC_KEY || !config.VAPID_PRIVATE_KEY) return;
@@ -885,6 +954,15 @@ function sendPushForMessage(msg) {
   // Check if this capcode is hidden - skip push notifications for hidden capcodes
   const hiddenAlias = db.prepare('SELECT 1 FROM capcode_aliases WHERE capcode = ? AND hidden = 1').get(normCapcode);
   if (hiddenAlias) return;
+
+  // Build set of user IDs who have silenced this capcode
+  const silencedUsers = new Set(
+    db.prepare('SELECT user_id FROM silenced_capcodes WHERE capcode = ?').all(normCapcode).map(r => r.user_id)
+  );
+
+  const logNotification = db.prepare(
+    'INSERT INTO notification_log (user_id, message_id, capcode, title, body, match_type, match_detail) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  );
 
   // Find groups this capcode belongs to (by capcode OR keyword match)
   const capcodeGroups = db.prepare(
@@ -905,48 +983,69 @@ function sendPushForMessage(msg) {
   if (groups.length > 0) {
     const groupIds = groups.map((g) => g.id);
     const placeholders = groupIds.map(() => '?').join(',');
-    const subs = db.prepare(`
-      SELECT DISTINCT ps.endpoint, ps.keys_json
+    // Get per-user subscriptions (need user_id for silenced check + logging)
+    const userSubs = db.prepare(`
+      SELECT DISTINCT ps.user_id, ps.endpoint, ps.keys_json
       FROM push_subscriptions ps
       JOIN user_favourites uf ON ps.user_id = uf.user_id
       WHERE uf.group_id IN (${placeholders}) AND uf.notify = 1
     `).all(...groupIds);
 
     const groupNames = groups.map((g) => g.name).join(', ');
+    const title = `PDW: ${msg.call_type || 'Page'} - ${groupNames}`;
+    const body = msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`;
     const payload = JSON.stringify({
-      title: `PDW: ${msg.call_type || 'Page'} - ${groupNames}`,
-      body: msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`,
+      title,
+      body,
       data: { messageId: msg.id, capcode: msg.capcode },
     });
 
-    sendToSubscriptions(subs, payload);
+    // Group subs by user, filter silenced
+    const perUser = new Map();
+    for (const s of userSubs) {
+      if (silencedUsers.has(s.user_id)) continue;
+      if (!perUser.has(s.user_id)) perUser.set(s.user_id, []);
+      perUser.get(s.user_id).push(s);
+    }
+    for (const [userId, subs] of perUser) {
+      sendToSubscriptions(subs, payload);
+      try { logNotification.run(userId, msg.id, normCapcode, title, body, 'group', groupNames); } catch { /* ignore */ }
+    }
   }
 
   // ─── Keyword alert notifications ───
   // (reuse `content` from line above)
   if (!content) return;
 
-  const keywordAlerts = db.prepare('SELECT DISTINCT ka.user_id, ka.keyword FROM keyword_alerts ka WHERE ka.notify = 1').all();
+  const keywordAlerts = db.prepare('SELECT DISTINCT ka.user_id, ka.keyword, ka.group_id FROM keyword_alerts ka WHERE ka.notify = 1').all();
   const matchedUsers = new Map(); // user_id -> matched keywords
 
   for (const ka of keywordAlerts) {
-    if (content.includes(ka.keyword.toLowerCase())) {
-      if (!matchedUsers.has(ka.user_id)) matchedUsers.set(ka.user_id, []);
-      matchedUsers.get(ka.user_id).push(ka.keyword);
+    if (!content.includes(ka.keyword.toLowerCase())) continue;
+    // If scoped to a group, check the message belongs to that group
+    if (ka.group_id) {
+      const msgInGroup = groups.some(g => g.id === ka.group_id);
+      if (!msgInGroup) continue;
     }
+    if (!matchedUsers.has(ka.user_id)) matchedUsers.set(ka.user_id, []);
+    matchedUsers.get(ka.user_id).push(ka.keyword);
   }
 
   for (const [userId, keywords] of matchedUsers) {
+    if (silencedUsers.has(userId)) continue;
     const subs = db.prepare('SELECT endpoint, keys_json FROM push_subscriptions WHERE user_id = ?').all(userId);
     if (subs.length === 0) continue;
 
+    const title = `PDW Alert: ${keywords.join(', ')}`;
+    const body = msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`;
     const payload = JSON.stringify({
-      title: `PDW Alert: ${keywords.join(', ')}`,
-      body: msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`,
+      title,
+      body,
       data: { messageId: msg.id, capcode: msg.capcode, keywordMatch: true },
     });
 
     sendToSubscriptions(subs, payload);
+    try { logNotification.run(userId, msg.id, normCapcode, title, body, 'keyword', keywords.join(', ')); } catch { /* ignore */ }
   }
 
   // ─── Alarm level notifications ───
@@ -958,6 +1057,7 @@ function sendPushForMessage(msg) {
     ).all(alarmLevel);
 
     for (const user of alarmUsers) {
+      if (silencedUsers.has(user.id)) continue;
       // Skip if user already notified via group or keyword
       const alreadyNotified = matchedUsers.has(user.id) ||
         (groups.length > 0 && db.prepare(
@@ -969,13 +1069,16 @@ function sendPushForMessage(msg) {
       if (subs.length === 0) continue;
 
       const ordinal = alarmLevel === 2 ? '2nd' : alarmLevel === 3 ? '3rd' : `${alarmLevel}th`;
+      const title = `PDW: ${ordinal} Alarm!`;
+      const body = msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`;
       const payload = JSON.stringify({
-        title: `PDW: ${ordinal} Alarm!`,
-        body: msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`,
+        title,
+        body,
         data: { messageId: msg.id, capcode: msg.capcode, alarmLevel },
       });
 
       sendToSubscriptions(subs, payload);
+      try { logNotification.run(user.id, msg.id, normCapcode, title, body, 'alarm', `${ordinal} Alarm`); } catch { /* ignore */ }
     }
   }
 }

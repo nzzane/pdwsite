@@ -289,6 +289,29 @@ a:hover { text-decoration: underline; }
   padding-bottom: var(--safe-bottom);
 }
 
+/* ─── Pull to refresh ─── */
+.pull-to-refresh {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  height: 0;
+  overflow: hidden;
+  transition: height 0.2s ease;
+  background: var(--bg-card);
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  flex-shrink: 0;
+}
+.pull-to-refresh.pulling { height: 40px; }
+.pull-to-refresh.refreshing { height: 40px; }
+.pull-to-refresh.refreshing .ptr-spinner {
+  animation: spin 0.8s linear infinite;
+}
+.pull-to-refresh.refreshing .ptr-text::after { content: 'Refreshing...'; }
+.pull-to-refresh.pulling .ptr-text::after { content: 'Release to refresh'; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 /* ─── Search bar ─── */
 .search-bar {
   padding: 0.375rem 0.75rem;
@@ -672,6 +695,88 @@ a:hover { text-decoration: underline; }
 .notif-toggle input:checked + .slider { background: var(--success); }
 .notif-toggle input:checked + .slider::before { transform: translateX(16px); background: #fff; }
 .notif-empty { font-size: 0.8rem; color: var(--text-muted); padding: 0.25rem 0; }
+
+/* Notification log entries */
+.notif-log-item {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+.notif-log-item:last-child { border-bottom: none; }
+.notif-log-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+}
+.notif-log-title { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notif-log-time { font-size: 0.75rem; color: var(--text-muted); flex-shrink: 0; }
+.notif-log-body { font-size: 0.8rem; color: var(--text-dim); margin-top: 0.125rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.notif-log-meta { font-size: 0.7rem; color: var(--text-muted); margin-top: 0.125rem; display: flex; gap: 0.5rem; align-items: center; }
+.notif-log-badge {
+  display: inline-block;
+  padding: 0.1rem 0.375rem;
+  border-radius: 3px;
+  font-size: 0.65rem;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.notif-log-badge.group { background: rgba(59,130,246,0.2); color: var(--primary); }
+.notif-log-badge.keyword { background: rgba(245,158,11,0.2); color: var(--warning); }
+.notif-log-badge.alarm { background: rgba(239,68,68,0.2); color: var(--danger); }
+
+/* Silenced capcode chip */
+.silenced-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  font-size: 0.8rem;
+  margin: 0.25rem 0.25rem 0 0;
+}
+.silenced-chip button {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 1rem;
+  line-height: 1;
+  padding: 0;
+}
+.silenced-chip button:hover { color: var(--danger); }
+
+/* Notification tabs */
+.notif-tabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0.75rem;
+}
+.notif-tab {
+  padding: 0.5rem 1rem;
+  font-size: 0.8rem;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+.notif-tab:hover { color: var(--text); }
+.notif-tab.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+/* Default view selector */
+.pref-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.375rem 0;
+}
+.pref-row label { font-size: 0.85rem; }
+.pref-row select { max-width: 200px; }
 
 /* Bell icon states */
 .btn-icon.notifications-active { color: var(--success); }

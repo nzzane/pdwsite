@@ -23,6 +23,9 @@
     searchPage: 0,
     searchLimit: 50,
     alarmLevelSetting: null, // null = off, 2-5 = minimum alarm level
+    preferences: { default_view: 'live', default_group_id: null, default_keyword: null },
+    silencedCapcodes: [],
+    notifTab: 'settings', // 'settings' or 'history'
   };
 
   // ─── Call type categories ───
@@ -229,15 +232,25 @@
       }
     }
 
-    // Check keyword alerts
+    // Check keyword alerts (with optional group scoping)
     if (!matched) {
       const content = (msg.content || '').toLowerCase();
+      const normCap = normalizeCapcode(msg.capcode);
       for (const ka of state.keywordAlerts) {
-        if (content.includes(ka.keyword.toLowerCase())) {
-          matched = true;
-          matchReason = 'Keyword: ' + ka.keyword;
-          break;
+        if (!content.includes(ka.keyword.toLowerCase())) continue;
+        // If scoped to a group, check message belongs to that group
+        if (ka.group_id) {
+          const group = state.groups.find(g => g.id === ka.group_id);
+          if (group) {
+            let inGroup = false;
+            if (group.members) inGroup = group.members.some(m => normalizeCapcode(m.capcode) === normCap);
+            if (!inGroup && group.keywords) inGroup = group.keywords.some(kw => content.includes(kw.keyword.toLowerCase()));
+            if (!inGroup) continue;
+          }
         }
+        matched = true;
+        matchReason = 'Keyword: ' + ka.keyword;
+        break;
       }
     }
 
@@ -555,6 +568,62 @@
     list.insertBefore(card, list.firstChild);
   }
 
+  // ─── Pull to refresh ───
+  function setupPullToRefresh() {
+    const list = $('#message-list');
+    const ptr = $('#pull-to-refresh');
+    if (!list || !ptr) return;
+
+    let startY = 0;
+    let pulling = false;
+
+    list.addEventListener('touchstart', (e) => {
+      if (list.scrollTop === 0) {
+        startY = e.touches[0].clientY;
+        pulling = true;
+      }
+    }, { passive: true });
+
+    list.addEventListener('touchmove', (e) => {
+      if (!pulling) return;
+      const diff = e.touches[0].clientY - startY;
+      if (diff > 60 && list.scrollTop === 0) {
+        ptr.classList.add('pulling');
+      } else {
+        ptr.classList.remove('pulling');
+      }
+    }, { passive: true });
+
+    list.addEventListener('touchend', async () => {
+      if (!pulling) return;
+      pulling = false;
+      if (ptr.classList.contains('pulling')) {
+        ptr.classList.remove('pulling');
+        ptr.classList.add('refreshing');
+        await loadRecentMessages();
+        ptr.classList.remove('refreshing');
+        toast('Feed refreshed', 'success');
+      }
+    });
+
+    // Desktop: scroll to top and click to refresh
+    list.addEventListener('scroll', () => {
+      if (list.scrollTop === 0 && state.messages.length > 0) {
+        ptr.classList.add('pulling');
+      } else {
+        ptr.classList.remove('pulling');
+      }
+    });
+
+    ptr.addEventListener('click', async () => {
+      ptr.classList.remove('pulling');
+      ptr.classList.add('refreshing');
+      await loadRecentMessages();
+      ptr.classList.remove('refreshing');
+      toast('Feed refreshed', 'success');
+    });
+  }
+
   function matchesFilters(msg) {
     const search = $('#filter-search').value.toLowerCase();
     const callType = $('#filter-call-type').value;
@@ -597,7 +666,7 @@
   // ─── Load data ───
   async function loadInitialData() {
     try {
-      const [groups, favs, aliases, callTypes, filters, keywordAlerts, alarmLevelData] = await Promise.all([
+      const [groups, favs, aliases, callTypes, filters, keywordAlerts, alarmLevelData, prefs, silenced] = await Promise.all([
         api('/api/groups'),
         api('/api/favourites'),
         api('/api/aliases'),
@@ -605,6 +674,8 @@
         api('/api/filters'),
         api('/api/keyword-alerts'),
         api('/api/alarm-level-alert'),
+        api('/api/preferences'),
+        api('/api/silenced-capcodes'),
       ]);
 
       state.groups = groups;
@@ -613,6 +684,8 @@
       state.filters = filters;
       state.keywordAlerts = keywordAlerts;
       state.alarmLevelSetting = alarmLevelData.min_alarm_level || null;
+      state.preferences = prefs;
+      state.silencedCapcodes = silenced;
 
       // Sync alarm level dropdown
       const alarmSelect = $('#alarm-level-select');
@@ -713,7 +786,7 @@
     } else {
       keywordsEl.innerHTML = state.keywordAlerts.map(ka => `
         <div class="keyword-item">
-          <span class="keyword-text">${esc(ka.keyword)}</span>
+          <span class="keyword-text">${esc(ka.keyword)}${ka.group_name ? ' <span style="font-size:0.7rem;color:var(--text-muted)">(' + esc(ka.group_name) + ')</span>' : ''}</span>
           <button class="keyword-remove" data-remove-keyword="${ka.id}" title="Remove">&times;</button>
         </div>
       `).join('');
@@ -932,6 +1005,114 @@
     const el = $('#notifications-content');
     if (!el) return;
 
+    // Tabs header
+    el.innerHTML = `
+      <div class="notif-tabs">
+        <button class="notif-tab ${state.notifTab === 'settings' ? 'active' : ''}" data-ntab="settings">Settings</button>
+        <button class="notif-tab ${state.notifTab === 'history' ? 'active' : ''}" data-ntab="history">Recent</button>
+      </div>
+      <div id="notif-tab-content"></div>
+    `;
+
+    el.querySelectorAll('.notif-tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        state.notifTab = tab.dataset.ntab;
+        loadNotifications();
+      });
+    });
+
+    if (state.notifTab === 'history') {
+      await loadNotificationHistory();
+    } else {
+      await loadNotificationSettings();
+    }
+  }
+
+  async function loadNotificationHistory() {
+    const container = $('#notif-tab-content');
+    if (!container) return;
+
+    let logs = [];
+    try {
+      logs = await api('/api/notification-log?limit=100');
+    } catch { /* ignore */ }
+
+    if (logs.length === 0) {
+      container.innerHTML = `
+        <div class="notif-section">
+          <div class="notif-empty">No recent notifications. Notifications will appear here once you start receiving them.</div>
+        </div>
+      `;
+      return;
+    }
+
+    const logsHtml = logs.map(log => {
+      const normCap = normalizeCapcode(log.capcode || '');
+      const alias = state.aliases[normCap];
+      const aliasName = alias ? alias.alias : '';
+      const isSilenced = state.silencedCapcodes.some(s => s.capcode === normCap);
+      return `
+        <div class="notif-log-item">
+          <div class="notif-log-header">
+            <span class="notif-log-title">${esc(log.title)}</span>
+            <span class="notif-log-time">${timeAgo(log.created_at)}</span>
+          </div>
+          <div class="notif-log-body">${esc(log.body || '')}</div>
+          <div class="notif-log-meta">
+            <span class="notif-log-badge ${esc(log.match_type)}">${esc(log.match_type)}</span>
+            ${log.match_detail ? '<span>' + esc(log.match_detail) + '</span>' : ''}
+            ${log.capcode ? '<span>Cap: ' + esc(log.capcode) + (aliasName ? ' (' + esc(aliasName) + ')' : '') + '</span>' : ''}
+            ${log.capcode && !isSilenced ? '<button class="btn btn-sm" style="padding:0.15rem 0.375rem;font-size:0.65rem" data-silence-capcode="' + esc(normCap) + '">Silence</button>' : ''}
+            ${log.capcode && isSilenced ? '<span style="font-size:0.65rem;color:var(--text-muted)">(silenced)</span>' : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    container.innerHTML = `
+      <div class="notif-section">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.5rem">
+          <h3 style="margin:0">Recent Notifications</h3>
+          <button class="btn btn-sm btn-secondary" id="btn-clear-notif-log">Clear All</button>
+        </div>
+        ${logsHtml}
+      </div>
+    `;
+
+    // Bind silence buttons
+    container.querySelectorAll('[data-silence-capcode]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const capcode = btn.dataset.silenceCapcode;
+        try {
+          await api('/api/silenced-capcodes', { method: 'POST', body: JSON.stringify({ capcode }) });
+          state.silencedCapcodes = await api('/api/silenced-capcodes');
+          toast(`Capcode ${capcode} silenced`, 'success');
+          loadNotifications();
+        } catch (err) {
+          toast(err.message, 'error');
+        }
+      });
+    });
+
+    // Bind clear log
+    const clearBtn = container.querySelector('#btn-clear-notif-log');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', async () => {
+        try {
+          await api('/api/notification-log', { method: 'DELETE' });
+          toast('Notification log cleared', 'success');
+          loadNotifications();
+        } catch (err) {
+          toast(err.message, 'error');
+        }
+      });
+    }
+  }
+
+  async function loadNotificationSettings() {
+    const container = $('#notif-tab-content');
+    if (!container) return;
+
     // Check current push status
     let pushActive = false;
     try {
@@ -968,14 +1149,17 @@
       }).join('');
     }
 
-    // Build keyword alerts list
+    // Build keyword alerts list (show group scope)
     let keywordsHtml = '';
     if (state.keywordAlerts.length === 0) {
       keywordsHtml = '<div class="notif-empty">No keyword alerts. Add keywords from the sidebar to get notified when they appear in pages.</div>';
     } else {
       keywordsHtml = state.keywordAlerts.map(ka => `
         <div class="notif-item">
-          <div class="notif-item-label">${esc(ka.keyword)}</div>
+          <div class="notif-item-label">
+            ${esc(ka.keyword)}
+            ${ka.group_name ? '<span style="font-size:0.7rem;color:var(--text-muted);margin-left:0.25rem">(' + esc(ka.group_name) + ')</span>' : ''}
+          </div>
           <label class="notif-toggle">
             <input type="checkbox" ${ka.notify ? 'checked' : ''} data-keyword-notify="${ka.id}">
             <span class="slider"></span>
@@ -994,7 +1178,23 @@
       { val: '5', label: '5th Alarm only' },
     ];
 
-    el.innerHTML = `
+    // Silenced capcodes
+    const silencedHtml = state.silencedCapcodes.length === 0
+      ? '<div class="notif-empty">No silenced capcodes. You can silence a capcode from the Recent tab to stop receiving notifications for it.</div>'
+      : '<div style="display:flex;flex-wrap:wrap">' + state.silencedCapcodes.map(s => {
+          const alias = state.aliases[s.capcode];
+          return `<div class="silenced-chip">
+            <span>${esc(s.capcode)}${alias ? ' (' + esc(alias.alias) + ')' : ''}</span>
+            <button data-unsilence="${esc(s.capcode)}" title="Unsilence">&times;</button>
+          </div>`;
+        }).join('') + '</div>';
+
+    // Default view preference
+    const groupOptions = state.groups.map(g =>
+      `<option value="${g.id}" ${state.preferences.default_group_id == g.id ? 'selected' : ''}>${esc(g.name)}</option>`
+    ).join('');
+
+    container.innerHTML = `
       <div class="notif-section">
         <h3>Push Notifications</h3>
         <div class="notif-status">
@@ -1022,7 +1222,7 @@
       <div class="notif-section">
         <h3>Keyword Alerts</h3>
         <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem">
-          Toggle notifications for each keyword. Add new keywords from the sidebar.
+          Toggle notifications for each keyword. Keywords scoped to a group will only match pages from that group.
         </p>
         ${keywordsHtml}
       </div>
@@ -1036,16 +1236,47 @@
           ${alarmOptions.map(o => `<option value="${o.val}" ${o.val === String(alarmVal) ? 'selected' : ''}>${o.label}</option>`).join('')}
         </select>
       </div>
+
+      <div class="notif-section">
+        <h3>Silenced Capcodes</h3>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem">
+          Capcodes you've silenced will not trigger push notifications for you.
+        </p>
+        ${silencedHtml}
+      </div>
+
+      <div class="notif-section">
+        <h3>Default View</h3>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem">
+          Choose what to show when you open the app.
+        </p>
+        <div class="pref-row">
+          <label>Default page</label>
+          <select id="pref-default-view" class="filter-select">
+            <option value="live" ${state.preferences.default_view === 'live' ? 'selected' : ''}>Live Feed</option>
+            <option value="search" ${state.preferences.default_view === 'search' ? 'selected' : ''}>Search</option>
+            <option value="stats" ${state.preferences.default_view === 'stats' ? 'selected' : ''}>Stats</option>
+            <option value="notifications" ${state.preferences.default_view === 'notifications' ? 'selected' : ''}>Notifications</option>
+          </select>
+        </div>
+        <div class="pref-row">
+          <label>Default group filter</label>
+          <select id="pref-default-group" class="filter-select">
+            <option value="">None (all groups)</option>
+            ${groupOptions}
+          </select>
+        </div>
+      </div>
     `;
 
     // Bind push toggle
-    el.querySelector('#notif-push-toggle').addEventListener('click', async () => {
+    container.querySelector('#notif-push-toggle').addEventListener('click', async () => {
       await toggleNotifications();
-      loadNotifications(); // Refresh view
+      loadNotifications();
     });
 
     // Bind group notify toggles
-    el.querySelectorAll('[data-fav-notify]').forEach(input => {
+    container.querySelectorAll('[data-fav-notify]').forEach(input => {
       input.addEventListener('change', async () => {
         const groupId = parseInt(input.dataset.favNotify, 10);
         try {
@@ -1053,7 +1284,6 @@
             method: 'PUT',
             body: JSON.stringify({ notify: input.checked }),
           });
-          // Update local state
           const fav = state.favourites.find(f => f.group_id === groupId);
           if (fav) fav.notify = input.checked ? 1 : 0;
           renderSidebar();
@@ -1065,7 +1295,7 @@
     });
 
     // Bind keyword notify toggles
-    el.querySelectorAll('[data-keyword-notify]').forEach(input => {
+    container.querySelectorAll('[data-keyword-notify]').forEach(input => {
       input.addEventListener('change', async () => {
         const id = parseInt(input.dataset.keywordNotify, 10);
         try {
@@ -1073,7 +1303,6 @@
             method: 'PUT',
             body: JSON.stringify({ notify: input.checked }),
           });
-          // Update local state
           const ka = state.keywordAlerts.find(k => k.id === id);
           if (ka) ka.notify = input.checked ? 1 : 0;
         } catch (err) {
@@ -1084,7 +1313,7 @@
     });
 
     // Bind alarm level
-    el.querySelector('#notif-alarm-level').addEventListener('change', async (e) => {
+    container.querySelector('#notif-alarm-level').addEventListener('change', async (e) => {
       const level = e.target.value || null;
       try {
         await api('/api/alarm-level-alert', {
@@ -1092,7 +1321,6 @@
           body: JSON.stringify({ min_alarm_level: level }),
         });
         state.alarmLevelSetting = level ? parseInt(level, 10) : null;
-        // Sync sidebar dropdown
         const sidebarSelect = $('#alarm-level-select');
         if (sidebarSelect) sidebarSelect.value = level || '';
         toast('Alarm level updated', 'success');
@@ -1100,6 +1328,43 @@
         toast('Failed to update: ' + err.message, 'error');
       }
     });
+
+    // Bind unsilence buttons
+    container.querySelectorAll('[data-unsilence]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const capcode = btn.dataset.unsilence;
+        try {
+          await api(`/api/silenced-capcodes/${encodeURIComponent(capcode)}`, { method: 'DELETE' });
+          state.silencedCapcodes = await api('/api/silenced-capcodes');
+          toast(`Capcode ${capcode} unsilenced`, 'success');
+          loadNotifications();
+        } catch (err) {
+          toast(err.message, 'error');
+        }
+      });
+    });
+
+    // Bind default view preferences
+    container.querySelector('#pref-default-view').addEventListener('change', async (e) => {
+      state.preferences.default_view = e.target.value;
+      await savePreferences();
+    });
+    container.querySelector('#pref-default-group').addEventListener('change', async (e) => {
+      state.preferences.default_group_id = e.target.value || null;
+      await savePreferences();
+    });
+  }
+
+  async function savePreferences() {
+    try {
+      await api('/api/preferences', {
+        method: 'PUT',
+        body: JSON.stringify(state.preferences),
+      });
+      toast('Preferences saved', 'success');
+    } catch (err) {
+      toast('Failed to save: ' + err.message, 'error');
+    }
   }
 
   // ─── Admin panel ───
@@ -1545,12 +1810,23 @@
 
   // ─── Keyword alert modal ───
   function showAddKeywordModal() {
+    const groupOptions = state.groups.map(g =>
+      `<option value="${g.id}">${esc(g.name)}</option>`
+    ).join('');
     showModal('Add Keyword Alert', `
       <p style="font-size:0.85rem;color:var(--text-dim);margin-bottom:0.75rem">
         Get an in-app alert (with sound) when a message contains this keyword or address.
-        Works in all browsers including Safari.
+        Optionally scope it to a specific group/region.
       </p>
       <div class="form-group"><label>Keyword or Address</label><input type="text" id="keyword-input" placeholder="e.g. 3rd alarm, 123 Main St"></div>
+      <div class="form-group">
+        <label>Scope to Group (optional)</label>
+        <select id="keyword-group-select" class="filter-select" style="width:100%">
+          <option value="">All Groups (any page)</option>
+          ${groupOptions}
+        </select>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">Only alert when keyword appears in pages from this group</p>
+      </div>
     `, `
       <button class="btn" id="modal-cancel">Cancel</button>
       <button class="btn btn-primary" id="modal-save">Add Alert</button>
@@ -1559,8 +1835,9 @@
     $('#modal-save').onclick = async () => {
       const keyword = $('#keyword-input').value.trim();
       if (!keyword) return toast('Keyword required', 'error');
+      const groupId = $('#keyword-group-select').value || null;
       try {
-        await api('/api/keyword-alerts', { method: 'POST', body: JSON.stringify({ keyword }) });
+        await api('/api/keyword-alerts', { method: 'POST', body: JSON.stringify({ keyword, group_id: groupId }) });
         state.keywordAlerts = await api('/api/keyword-alerts');
         renderSidebar();
         hideModal();
@@ -1791,6 +2068,15 @@
     updateTopbarHeight();
     connectWs();
     await loadInitialData();
+
+    // Apply default view preference
+    if (state.preferences.default_view && state.preferences.default_view !== 'live') {
+      switchView(state.preferences.default_view);
+    }
+    if (state.preferences.default_group_id) {
+      $('#filter-group').value = state.preferences.default_group_id;
+      applyFilters();
+    }
 
     // Auto-subscribe to push if permission already granted (ensures background notifications work)
     autoSubscribePush();
@@ -2138,6 +2424,7 @@
   // ─── Init ───
   function init() {
     bindEvents();
+    setupPullToRefresh();
     registerSW();
 
     // Keep CSS variables in sync on resize / orientation change (critical for iOS Safari)

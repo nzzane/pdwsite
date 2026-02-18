@@ -167,6 +167,51 @@ db.exec(`
   );
 `);
 
+// User preferences table (default view, etc.)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS user_preferences (
+    user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    default_view TEXT DEFAULT 'live',
+    default_group_id INTEGER DEFAULT NULL,
+    default_keyword TEXT DEFAULT NULL,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+`);
+
+// Notification log table (tracks sent notifications per user)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS notification_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    message_id INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    capcode TEXT,
+    title TEXT NOT NULL,
+    body TEXT,
+    match_type TEXT NOT NULL,
+    match_detail TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_notification_log_user ON notification_log(user_id, created_at);
+`);
+
+// Silenced capcodes per user (suppresses notifications for specific capcodes)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS silenced_capcodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    capcode TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(user_id, capcode)
+  );
+`);
+
+// Add group_id column to keyword_alerts for scoping keywords to groups
+try {
+  db.exec("ALTER TABLE keyword_alerts ADD COLUMN group_id INTEGER DEFAULT NULL REFERENCES groups_(id) ON DELETE SET NULL");
+} catch (e) {
+  // Column already exists, ignore
+}
+
 // Normalize capcodes: strip leading zeros for consistent matching across FLEX/POCSAG
 try {
   db.exec("UPDATE group_members SET capcode = CASE WHEN LENGTH(LTRIM(capcode, '0')) = 0 THEN '0' ELSE LTRIM(capcode, '0') END WHERE capcode LIKE '0%'");
