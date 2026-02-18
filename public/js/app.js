@@ -25,7 +25,7 @@
     alarmLevelSetting: null, // null = off, 2-5 = minimum alarm level
     preferences: { default_view: 'live', default_group_id: null, default_keyword: null },
     silencedCapcodes: [],
-    notifTab: 'settings', // 'settings' or 'history'
+    notifTab: 'settings', // 'settings', 'history', or 'display'
   };
 
   // ─── Call type categories ───
@@ -568,59 +568,63 @@
     list.insertBefore(card, list.firstChild);
   }
 
-  // ─── Pull to refresh ───
+  // ─── Pull to refresh (touch only) ───
   function setupPullToRefresh() {
+    const view = $('#view-live');
     const list = $('#message-list');
     const ptr = $('#pull-to-refresh');
-    if (!list || !ptr) return;
+    if (!view || !list || !ptr) return;
 
     let startY = 0;
     let pulling = false;
+    let refreshing = false;
+    const THRESHOLD = 70;
 
-    list.addEventListener('touchstart', (e) => {
-      if (list.scrollTop === 0) {
+    view.addEventListener('touchstart', (e) => {
+      if (refreshing) return;
+      if (list.scrollTop <= 0) {
         startY = e.touches[0].clientY;
         pulling = true;
       }
     }, { passive: true });
 
-    list.addEventListener('touchmove', (e) => {
-      if (!pulling) return;
+    view.addEventListener('touchmove', (e) => {
+      if (!pulling || refreshing) return;
       const diff = e.touches[0].clientY - startY;
-      if (diff > 60 && list.scrollTop === 0) {
-        ptr.classList.add('pulling');
+      if (diff > 0 && list.scrollTop <= 0) {
+        // Proportional pull with resistance
+        const progress = Math.min(diff / THRESHOLD, 1);
+        const height = Math.min(diff * 0.4, 50);
+        ptr.style.height = height + 'px';
+        ptr.style.transition = 'none';
+        if (progress >= 1) {
+          ptr.classList.add('pulling');
+        } else {
+          ptr.classList.remove('pulling');
+        }
       } else {
+        ptr.style.height = '0px';
         ptr.classList.remove('pulling');
       }
     }, { passive: true });
 
-    list.addEventListener('touchend', async () => {
-      if (!pulling) return;
+    view.addEventListener('touchend', async () => {
+      if (!pulling || refreshing) return;
       pulling = false;
       if (ptr.classList.contains('pulling')) {
+        refreshing = true;
         ptr.classList.remove('pulling');
         ptr.classList.add('refreshing');
+        ptr.style.transition = 'height 0.2s ease';
+        ptr.style.height = '40px';
         await loadRecentMessages();
         ptr.classList.remove('refreshing');
-        toast('Feed refreshed', 'success');
-      }
-    });
-
-    // Desktop: scroll to top and click to refresh
-    list.addEventListener('scroll', () => {
-      if (list.scrollTop === 0 && state.messages.length > 0) {
-        ptr.classList.add('pulling');
+        ptr.style.height = '0px';
+        refreshing = false;
       } else {
-        ptr.classList.remove('pulling');
+        ptr.style.transition = 'height 0.2s ease';
+        ptr.style.height = '0px';
       }
-    });
-
-    ptr.addEventListener('click', async () => {
-      ptr.classList.remove('pulling');
-      ptr.classList.add('refreshing');
-      await loadRecentMessages();
-      ptr.classList.remove('refreshing');
-      toast('Feed refreshed', 'success');
     });
   }
 
@@ -1000,16 +1004,17 @@
     }
   }
 
-  // ─── Notifications settings view ───
+  // ─── Settings view ───
   async function loadNotifications() {
     const el = $('#notifications-content');
     if (!el) return;
 
-    // Tabs header
+    // Tabs: Notification Settings | Recent Notifications | Display Settings
     el.innerHTML = `
       <div class="notif-tabs">
-        <button class="notif-tab ${state.notifTab === 'settings' ? 'active' : ''}" data-ntab="settings">Settings</button>
-        <button class="notif-tab ${state.notifTab === 'history' ? 'active' : ''}" data-ntab="history">Recent</button>
+        <button class="notif-tab ${state.notifTab === 'settings' ? 'active' : ''}" data-ntab="settings">Notification Settings</button>
+        <button class="notif-tab ${state.notifTab === 'history' ? 'active' : ''}" data-ntab="history">Recent Notifications</button>
+        <button class="notif-tab ${state.notifTab === 'display' ? 'active' : ''}" data-ntab="display">Display Settings</button>
       </div>
       <div id="notif-tab-content"></div>
     `;
@@ -1023,6 +1028,8 @@
 
     if (state.notifTab === 'history') {
       await loadNotificationHistory();
+    } else if (state.notifTab === 'display') {
+      await loadDisplaySettings();
     } else {
       await loadNotificationSettings();
     }
@@ -1203,9 +1210,12 @@
             ${pushActive ? 'ON' : 'OFF'}
           </span>
         </div>
-        <button class="btn btn-sm ${pushActive ? 'btn-danger' : 'btn-primary'}" id="notif-push-toggle" style="margin-top:0.5rem">
-          ${pushActive ? 'Disable Push' : 'Enable Push'}
-        </button>
+        <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.5rem;flex-wrap:wrap">
+          <button class="btn btn-sm ${pushActive ? 'btn-danger' : 'btn-primary'}" id="notif-push-toggle">
+            ${pushActive ? 'Disable Push' : 'Enable Push'}
+          </button>
+          ${pushActive ? '<button class="btn btn-sm btn-secondary" id="btn-test-push-settings">Test Notification</button>' : ''}
+        </div>
         <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.5rem">
           Push notifications are sent when pages match your favourited groups, keyword alerts, or alarm level settings below.
         </p>
@@ -1243,29 +1253,6 @@
           Capcodes you've silenced will not trigger push notifications for you.
         </p>
         ${silencedHtml}
-      </div>
-
-      <div class="notif-section">
-        <h3>Default View</h3>
-        <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem">
-          Choose what to show when you open the app.
-        </p>
-        <div class="pref-row">
-          <label>Default page</label>
-          <select id="pref-default-view" class="filter-select">
-            <option value="live" ${state.preferences.default_view === 'live' ? 'selected' : ''}>Live Feed</option>
-            <option value="search" ${state.preferences.default_view === 'search' ? 'selected' : ''}>Search</option>
-            <option value="stats" ${state.preferences.default_view === 'stats' ? 'selected' : ''}>Stats</option>
-            <option value="notifications" ${state.preferences.default_view === 'notifications' ? 'selected' : ''}>Notifications</option>
-          </select>
-        </div>
-        <div class="pref-row">
-          <label>Default group filter</label>
-          <select id="pref-default-group" class="filter-select">
-            <option value="">None (all groups)</option>
-            ${groupOptions}
-          </select>
-        </div>
       </div>
     `;
 
@@ -1344,7 +1331,61 @@
       });
     });
 
-    // Bind default view preferences
+    // Bind test push button
+    const testPushBtn = container.querySelector('#btn-test-push-settings');
+    if (testPushBtn) {
+      testPushBtn.addEventListener('click', async () => {
+        testPushBtn.disabled = true;
+        testPushBtn.textContent = 'Sending...';
+        try {
+          const result = await api('/api/push/test', { method: 'POST' });
+          if (result.sent > 0) {
+            toast(`Test notification sent! (${result.sent} delivered, ${result.failed} failed)`, 'success');
+          } else {
+            toast('All notifications failed: ' + (result.errors || []).join(', '), 'error');
+          }
+        } catch (err) {
+          toast('Test failed: ' + err.message, 'error');
+        }
+        testPushBtn.disabled = false;
+        testPushBtn.textContent = 'Test Notification';
+      });
+    }
+  }
+
+  async function loadDisplaySettings() {
+    const container = $('#notif-tab-content');
+    if (!container) return;
+
+    const groupOptions = state.groups.map(g =>
+      `<option value="${g.id}" ${state.preferences.default_group_id == g.id ? 'selected' : ''}>${esc(g.name)}</option>`
+    ).join('');
+
+    container.innerHTML = `
+      <div class="notif-section">
+        <h3>Default View</h3>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.5rem">
+          Choose what to show when you open the app or tap the home button.
+        </p>
+        <div class="pref-row">
+          <label>Default page</label>
+          <select id="pref-default-view" class="filter-select">
+            <option value="live" ${state.preferences.default_view === 'live' ? 'selected' : ''}>Live Feed</option>
+            <option value="search" ${state.preferences.default_view === 'search' ? 'selected' : ''}>Search</option>
+            <option value="stats" ${state.preferences.default_view === 'stats' ? 'selected' : ''}>Stats</option>
+            <option value="notifications" ${state.preferences.default_view === 'notifications' ? 'selected' : ''}>Settings</option>
+          </select>
+        </div>
+        <div class="pref-row">
+          <label>Default group filter</label>
+          <select id="pref-default-group" class="filter-select">
+            <option value="">None (all groups)</option>
+            ${groupOptions}
+          </select>
+        </div>
+      </div>
+    `;
+
     container.querySelector('#pref-default-view').addEventListener('change', async (e) => {
       state.preferences.default_view = e.target.value;
       await savePreferences();
@@ -2141,10 +2182,10 @@
           To receive push notifications for specific groups:
         </p>
         <ol style="font-size:0.85rem;line-height:1.6;color:var(--text-dim);margin:0 0 0 1.25rem">
-          <li>Click the <strong>bell icon</strong> in the top bar to enable notifications</li>
+          <li>Click the <strong>bell icon</strong> in the top bar or go to <strong>Settings</strong> to enable push</li>
           <li>Allow notifications when prompted by your browser</li>
-          <li>Add groups to your <strong>Favourites</strong> in the sidebar (with the bell enabled)</li>
-          <li>You'll receive a push notification whenever a page matches your favourited groups</li>
+          <li>Add groups to your <strong>Favourites</strong> in the sidebar</li>
+          <li>Manage all notification toggles in <strong>Settings &gt; Notification Settings</strong></li>
         </ol>
       </div>
     `, `
@@ -2204,11 +2245,11 @@
     $('#menu-change-pw').addEventListener('click', (e) => { e.preventDefault(); showChangePasswordModal(); });
     $('#menu-admin').addEventListener('click', (e) => { e.preventDefault(); switchView('admin'); $('#user-menu').classList.add('hidden'); });
 
-    // Home button - reset to Live Feed with no filters, force reload messages
+    // Home button - go to user's default view (with default group filter)
     $('#btn-home').addEventListener('click', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      // Clear all filters
+      // Clear all filters first
       $('#filter-search').value = '';
       $('#filter-call-type').value = '';
       $('#filter-protocol').value = '';
@@ -2217,19 +2258,24 @@
       $('#filter-trucks').value = '';
       $('#filter-group').value = '';
       if ($('#filter-hide-test')) $('#filter-hide-test').checked = true;
-      // Switch view to live (won't re-fetch if already on live)
-      state.currentView = 'live';
-      $$('.view').forEach(v => v.classList.remove('active'));
-      $('#view-live').classList.add('active');
-      $$('.nav-item[data-view]').forEach(n => n.classList.toggle('active', n.dataset.view === 'live'));
+      // Apply default group filter if set
+      if (state.preferences.default_group_id) {
+        $('#filter-group').value = state.preferences.default_group_id;
+      }
+      // Switch to default view
+      const defaultView = state.preferences.default_view || 'live';
+      switchView(defaultView);
       // Close panels
       closeSidebar();
       hideDetail();
       // Un-pause if paused
       state.paused = false;
       $('#btn-pause').textContent = 'Pause';
-      // Force reload messages from API
-      loadRecentMessages();
+      // Force reload messages if going to live
+      if (defaultView === 'live') {
+        applyFilters();
+        loadRecentMessages();
+      }
     });
 
     // Detail backdrop click to close
@@ -2286,7 +2332,12 @@
       $('#filter-trucks').value = '';
       $('#filter-group').value = '';
       $('#filter-hide-test').checked = true;
+      // Switch to live view if not already there
+      if (state.currentView !== 'live') {
+        switchView('live');
+      }
       applyFilters();
+      loadRecentMessages();
     });
     $('#btn-save-filter').addEventListener('click', showSaveFilterModal);
 
