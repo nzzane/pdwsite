@@ -4,6 +4,7 @@ const path = require('path');
 const { WebSocketServer } = require('ws');
 const jwt = require('jsonwebtoken');
 const config = require('./config');
+const db = require('./db');
 const { router, setBroadcast } = require('./routes');
 const { logError, pruneOldLogs } = require('./logger');
 
@@ -165,6 +166,25 @@ const heartbeat = setInterval(() => {
 }, 30000);
 
 wss.on('close', () => clearInterval(heartbeat));
+
+// ─── One-time migration: tag existing status/timing messages as MISC ───
+try {
+  const { detectStatusMessage } = require('./parser');
+  const untagged = db.prepare("SELECT id, content FROM messages WHERE call_type IS NULL").all();
+  if (untagged.length > 0) {
+    const update = db.prepare("UPDATE messages SET call_type = 'MISC' WHERE id = ?");
+    let tagged = 0;
+    for (const msg of untagged) {
+      if (detectStatusMessage(msg.content)) {
+        update.run(msg.id);
+        tagged++;
+      }
+    }
+    if (tagged > 0) console.log(`Migration: tagged ${tagged} existing messages as MISC`);
+  }
+} catch (err) {
+  console.error('MISC migration error:', err.message);
+}
 
 // ─── Periodic DB maintenance (prune old logs every 6 hours) ───
 const pruneInterval = setInterval(() => {

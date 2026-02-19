@@ -125,8 +125,29 @@ function detectAmboCallType(content) {
 }
 
 /**
+ * Detect CAD status/timing messages that are not real dispatches.
+ * These include unit assignment updates, job timing references, and status updates.
+ * Returns 'MISC' if matched, null otherwise.
+ */
+function detectStatusMessage(content) {
+  if (!content) return null;
+  // "Unit: MALB1 Assigned to Station: Picton"
+  if (/\bUnit:\s*\S+\s+Assigned to Station:/i.test(content)) return 'MISC';
+  // "Assigned to Station:" without Unit prefix
+  if (/\bAssigned to Station:/i.test(content)) return 'MISC';
+  // Full-word timing: "Unit:HAM6 Job #0231-1-2026/0Responded:08:23Located:08:33Departed:09:09Destination:09:31"
+  if (/(?:Responded|Located|Departed|Destination):\d{2}:\d{2}/i.test(content)) return 'MISC';
+  // Abbreviated timing: "GREY1 Ref:0561-3-2026/02/19 Rec:18:52Disp:18:52Loc:19:07"
+  if (/Ref:\S+\s*(?:Rec|Disp|Resp|Loc|Dep|Dest|Can):/i.test(content)) return 'MISC';
+  // Status messages like "Enroute", "On Scene", "Available"
+  if (/^\s*(Enroute|On Scene|Available|At Station|Responding|Returning)\s*$/i.test(content)) return 'MISC';
+  return null;
+}
+
+/**
  * Detect call type from message content.
- * Tries ambo format extraction first, then falls back to keyword patterns.
+ * Tries ambo format extraction first, then falls back to keyword patterns,
+ * then checks for CAD status/timing messages (tagged as MISC).
  */
 function detectCallType(content) {
   if (!content) return null;
@@ -137,6 +158,9 @@ function detectCallType(content) {
   for (const { pattern, type } of CALL_TYPE_PATTERNS) {
     if (pattern.test(content)) return type;
   }
+  // Check for CAD status/timing messages
+  const status = detectStatusMessage(content);
+  if (status) return status;
   return null;
 }
 
@@ -185,6 +209,7 @@ const CALL_TYPE_COLOUR_MAP = {
   'SHIP': '#0284c7', 'ADV': '#f59e0b', 'EXERCISE': '#9ca3af',
   'FIRETEST': '#9ca3af', 'STNCALL': '#64748b', 'TRA': '#7c3aed',
   'TEST': '#9ca3af',
+  'MISC': '#64748b',
 };
 
 /**
@@ -529,6 +554,7 @@ module.exports = {
   CALL_TYPE_PATTERNS,
   cleanContent,
   detectCallType,
+  detectStatusMessage,
   getCallTypeColour,
   extractLocation,
   extractTrucks,

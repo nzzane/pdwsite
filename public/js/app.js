@@ -103,6 +103,7 @@
     'NAT1': '#0284c7', 'NAT2': '#0284c7', 'NAT3': '#0284c7',
     'SHIP': '#0284c7', 'ADV': '#f59e0b', 'EXERCISE': '#9ca3af',
     'FIRETEST': '#9ca3af', 'STNCALL': '#64748b', 'TRA': '#7c3aed',
+    'MISC': '#64748b',
   };
 
   // ─── DOM refs ───
@@ -321,7 +322,7 @@
     // Check if this capcode is hidden
     const isHidden = aliasObj && aliasObj.hidden;
     // Check if this is a status/CAD message
-    const isStatus = isStatusMessage(msg.content);
+    const isStatus = isStatusMessage(msg.content, msg.call_type);
 
     const card = document.createElement('div');
     card.className = 'msg-card highlight';
@@ -422,17 +423,19 @@
     document.documentElement.style.setProperty('--app-height', window.innerHeight + 'px');
   }
 
-  // ─── Detect CAD status/timing messages that should be greyed out ───
-  function isStatusMessage(content) {
+  // ─── Detect CAD status/timing messages (matches server-side MISC detection) ───
+  function isStatusMessage(content, callType) {
+    // If server already tagged as MISC, trust it
+    if (callType === 'MISC') return true;
     if (!content) return false;
     // "Unit: MALB1 Assigned to Station: Picton"
     if (/\bUnit:\s*\S+\s+Assigned to Station:/i.test(content)) return true;
-    // Abbreviated timing: "CHR2 Ref:0115-3-2026/02/18 Disp:06:13Resp:06:14Loc:06:31Dep:07:11Dest:07:45"
-    if (/Ref:\S+\s*Disp:\S+\s*Resp:/i.test(content)) return true;
-    // Full-word timing: "Unit:HAM6 Job #0231-1-2026/0Responded:08:23Located:08:33Departed:09:09Destination:09:31"
-    if (/Responded:\d{2}:\d{2}|Located:\d{2}:\d{2}|Departed:\d{2}:\d{2}|Destination:\d{2}:\d{2}/i.test(content)) return true;
     // "Assigned to Station:" without Unit prefix
     if (/\bAssigned to Station:/i.test(content)) return true;
+    // Full-word timing: "Unit:HAM6 Job #0231-1-2026/0Responded:08:23Located:08:33Departed:09:09Destination:09:31"
+    if (/(?:Responded|Located|Departed|Destination):\d{2}:\d{2}/i.test(content)) return true;
+    // Abbreviated timing: "GREY1 Ref:0561-3-2026/02/19 Rec:18:52Disp:18:52Loc:19:07"
+    if (/Ref:\S+\s*(?:Rec|Disp|Resp|Loc|Dep|Dest|Can):/i.test(content)) return true;
     // Status messages like "Enroute", "On Scene", "Available"
     if (/^\s*(Enroute|On Scene|Available|At Station|Responding|Returning)\s*$/i.test(content)) return true;
     return false;
@@ -723,8 +726,8 @@
     const groupId = $('#filter-group').value;
     const hideTest = $('#filter-hide-test') && $('#filter-hide-test').checked;
 
-    // Hide test pages by default
-    if (hideTest && msg.call_type === 'TEST') return false;
+    // Hide test and misc/status messages by default
+    if (hideTest && (msg.call_type === 'TEST' || msg.call_type === 'MISC' || isStatusMessage(msg.content, msg.call_type))) return false;
 
     if (search && !(msg.content || '').toLowerCase().includes(search)) return false;
     if (callType && msg.call_type !== callType) return false;
@@ -808,7 +811,7 @@
     try {
       const params = new URLSearchParams({ limit: '100' });
       if ($('#filter-hide-test') && $('#filter-hide-test').checked) {
-        params.set('exclude_call_type', 'TEST');
+        params.set('exclude_call_type', 'TEST,MISC');
       }
       const msgs = await api('/api/messages?' + params.toString());
       const list = $('#message-list');
@@ -1003,7 +1006,7 @@
         if (location) params.set('location', location);
         if (trucks) params.set('trucks', trucks);
         if (groupId) params.set('group_id', groupId);
-        if (hideTest) params.set('exclude_call_type', 'TEST');
+        if (hideTest) params.set('exclude_call_type', 'TEST,MISC');
 
         const msgs = await api('/api/messages?' + params.toString());
         const list = $('#message-list');

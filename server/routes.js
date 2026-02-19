@@ -218,8 +218,14 @@ router.get('/api/messages', requireAuth, (req, res) => {
     params.push(call_type);
   }
   if (exclude_call_type) {
-    conditions.push('(m.call_type IS NULL OR m.call_type != ?)');
-    params.push(exclude_call_type);
+    const excludeTypes = exclude_call_type.split(',').map(t => t.trim()).filter(Boolean);
+    if (excludeTypes.length === 1) {
+      conditions.push('(m.call_type IS NULL OR m.call_type != ?)');
+      params.push(excludeTypes[0]);
+    } else if (excludeTypes.length > 1) {
+      conditions.push(`(m.call_type IS NULL OR m.call_type NOT IN (${excludeTypes.map(() => '?').join(',')}))`);
+      params.push(...excludeTypes);
+    }
   }
   if (location) {
     conditions.push('m.location LIKE ?');
