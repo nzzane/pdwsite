@@ -32,6 +32,7 @@
     silencedCapcodes: [],
     notifTab: 'settings', // 'settings', 'history', or 'display'
     pendingMessageId: null, // messageId to scroll to after load (from notification click)
+    regions: [], // NZ regions with search terms for location filtering
   };
 
   // ─── Call type categories ───
@@ -724,6 +725,7 @@
     const location = $('#filter-location').value.toLowerCase();
     const trucks = $('#filter-trucks').value.toLowerCase();
     const groupId = $('#filter-group').value;
+    const regionName = $('#filter-region') ? $('#filter-region').value : '';
     const hideTest = $('#filter-hide-test') && $('#filter-hide-test').checked;
 
     // Hide test and misc/status messages by default
@@ -735,6 +737,14 @@
     if (capcode && normalizeCapcode(msg.capcode) !== normalizeCapcode(capcode)) return false;
     if (location && !(msg.location || '').toLowerCase().includes(location)) return false;
     if (trucks && !(msg.trucks || '').toLowerCase().includes(trucks)) return false;
+    if (regionName) {
+      const region = state.regions.find(r => r.name === regionName);
+      if (region) {
+        const content = (msg.content || '').toLowerCase();
+        const matchesRegion = region.terms.some(t => content.includes(t.toLowerCase()));
+        if (!matchesRegion) return false;
+      }
+    }
     if (groupId) {
       const group = state.groups.find(g => g.id === parseInt(groupId, 10));
       if (group) {
@@ -758,7 +768,7 @@
   // ─── Load data ───
   async function loadInitialData() {
     try {
-      const [groups, favs, aliases, callTypes, filters, keywordAlerts, alarmLevelData, prefs, silenced] = await Promise.all([
+      const [groups, favs, aliases, callTypes, filters, keywordAlerts, alarmLevelData, prefs, silenced, regions] = await Promise.all([
         api('/api/groups'),
         api('/api/favourites'),
         api('/api/aliases'),
@@ -768,11 +778,13 @@
         api('/api/alarm-level-alert'),
         api('/api/preferences'),
         api('/api/silenced-capcodes'),
+        api('/api/regions'),
       ]);
 
       state.groups = groups;
       state.favourites = favs;
       state.callTypes = callTypes;
+      state.regions = regions;
       state.filters = filters;
       state.keywordAlerts = keywordAlerts;
       state.alarmLevelSetting = alarmLevelData.min_alarm_level || null;
@@ -947,6 +959,7 @@
           if (f.search) $('#filter-search').value = f.search;
           if (f.call_type) $('#filter-call-type').value = f.call_type;
           if (f.protocol) $('#filter-protocol').value = f.protocol;
+          if (f.region) $('#filter-region').value = f.region;
           if (f.capcode) $('#filter-capcode').value = f.capcode;
           if (f.location) $('#filter-location').value = f.location;
           if (f.trucks) $('#filter-trucks').value = f.trucks;
@@ -978,6 +991,15 @@
     for (const g of state.groups) {
       gsel.innerHTML += `<option value="${g.id}">${esc(g.name)}</option>`;
     }
+
+    // Regions
+    const rsel = $('#filter-region');
+    if (rsel && state.regions) {
+      rsel.innerHTML = '<option value="">All Regions</option>';
+      for (const r of state.regions) {
+        rsel.innerHTML += `<option value="${esc(r.name)}">${esc(r.name)}</option>`;
+      }
+    }
   }
 
   // ─── Apply filters (re-fetch for search, re-filter for live) ───
@@ -998,6 +1020,7 @@
         const location = $('#filter-location').value;
         const trucks = $('#filter-trucks').value;
         const groupId = $('#filter-group').value;
+        const regionName = $('#filter-region') ? $('#filter-region').value : '';
         const hideTest = $('#filter-hide-test') && $('#filter-hide-test').checked;
         if (search) params.set('search', search);
         if (callType) params.set('call_type', callType);
@@ -1006,6 +1029,7 @@
         if (location) params.set('location', location);
         if (trucks) params.set('trucks', trucks);
         if (groupId) params.set('group_id', groupId);
+        if (regionName) params.set('region', regionName);
         if (hideTest) params.set('exclude_call_type', 'TEST,MISC');
 
         const msgs = await api('/api/messages?' + params.toString());
@@ -1035,6 +1059,7 @@
     const location = $('#filter-location').value;
     const trucks = $('#filter-trucks').value;
     const groupId = $('#filter-group').value;
+    const regionName = $('#filter-region') ? $('#filter-region').value : '';
     if (search) params.set('search', search);
     if (callType) params.set('call_type', callType);
     if (protocol) params.set('protocol', protocol);
@@ -1042,6 +1067,7 @@
     if (location) params.set('location', location);
     if (trucks) params.set('trucks', trucks);
     if (groupId) params.set('group_id', groupId);
+    if (regionName) params.set('region', regionName);
 
     try {
       const msgs = await api('/api/messages?' + params.toString());
@@ -2010,6 +2036,7 @@
       if ($('#filter-search').value) filter.search = $('#filter-search').value;
       if ($('#filter-call-type').value) filter.call_type = $('#filter-call-type').value;
       if ($('#filter-protocol').value) filter.protocol = $('#filter-protocol').value;
+      if ($('#filter-region').value) filter.region = $('#filter-region').value;
       if ($('#filter-capcode').value) filter.capcode = $('#filter-capcode').value;
       if ($('#filter-location').value) filter.location = $('#filter-location').value;
       if ($('#filter-trucks').value) filter.trucks = $('#filter-trucks').value;
@@ -2448,6 +2475,7 @@
       $('#filter-search').value = '';
       $('#filter-call-type').value = '';
       $('#filter-protocol').value = '';
+      $('#filter-region').value = '';
       $('#filter-capcode').value = '';
       $('#filter-location').value = '';
       $('#filter-trucks').value = '';
@@ -2513,6 +2541,7 @@
     $('#filter-search').addEventListener('input', onFilterChange);
     $('#filter-call-type').addEventListener('change', onFilterChange);
     $('#filter-protocol').addEventListener('change', onFilterChange);
+    $('#filter-region').addEventListener('change', onFilterChange);
     $('#filter-capcode').addEventListener('input', onFilterChange);
     $('#filter-location').addEventListener('input', onFilterChange);
     $('#filter-trucks').addEventListener('input', onFilterChange);
@@ -2522,6 +2551,7 @@
       $('#filter-search').value = '';
       $('#filter-call-type').value = '';
       $('#filter-protocol').value = '';
+      $('#filter-region').value = '';
       $('#filter-capcode').value = '';
       $('#filter-location').value = '';
       $('#filter-trucks').value = '';

@@ -5,6 +5,7 @@ const config = require('./config');
 const parser = require('./parser');
 const webpush = require('web-push');
 const { logError, logWarn } = require('./logger');
+const NZ_REGIONS = require('./regions');
 
 const router = express.Router();
 
@@ -191,6 +192,7 @@ router.get('/api/messages', requireAuth, (req, res) => {
     search,
     since,
     protocol,
+    region,
   } = req.query;
 
   let sql = 'SELECT DISTINCT m.* FROM messages m';
@@ -246,6 +248,16 @@ router.get('/api/messages', requireAuth, (req, res) => {
   if (since) {
     conditions.push('m.received_at > ?');
     params.push(since);
+  }
+  if (region) {
+    const regionData = NZ_REGIONS.find(r => r.name === region);
+    if (regionData && regionData.terms.length > 0) {
+      const termConditions = regionData.terms.map(() => 'm.content LIKE ?');
+      conditions.push(`(${termConditions.join(' OR ')})`);
+      for (const term of regionData.terms) {
+        params.push(`%${term}%`);
+      }
+    }
   }
 
   if (conditions.length > 0) {
@@ -319,6 +331,12 @@ router.get('/api/messages/call-types', requireAuth, (req, res) => {
     colour: p.colour,
   }));
   res.json(types);
+});
+
+// ─── Regions ───
+
+router.get('/api/regions', requireAuth, (req, res) => {
+  res.json(NZ_REGIONS);
 });
 
 // ─── Groups ───
