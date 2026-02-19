@@ -794,7 +794,7 @@ function processAfterFlexBuffer(msg) {
 }
 
 // Incident-based dedup buffer: collects FLEX messages with the same F-number
-// arriving within a short window, then inserts only the longest version.
+// arriving within a short window, then inserts the longest version per capcode.
 const incidentBuffer = new Map();
 const INCIDENT_BUFFER_MS = 15000; // 15 second window for the initial burst
 
@@ -805,33 +805,39 @@ function bufferByIncident(msg) {
   if (!incidentNum) return null;
 
   // DB-level dedup: if we already inserted a longer message with this F-number
-  // within the last 2 minutes, skip this shorter fragment
+  // AND same capcode within the last 2 minutes, skip this shorter fragment
   const existing = db.prepare(
-    "SELECT LENGTH(content) as len FROM messages WHERE content LIKE ? AND received_at > datetime('now', '-120 seconds') ORDER BY LENGTH(content) DESC LIMIT 1"
-  ).get(`%${incidentNum}%`);
+    "SELECT LENGTH(content) as len FROM messages WHERE capcode = ? AND content LIKE ? AND received_at > datetime('now', '-120 seconds') ORDER BY LENGTH(content) DESC LIMIT 1"
+  ).get(msg.capcode, `%${incidentNum}%`);
   if (existing && existing.len >= (msg.content || '').length) {
-    return { buffered: true }; // Already have a better version in DB
+    return { buffered: true }; // Already have a better version in DB for this capcode
   }
 
   let entry = incidentBuffer.get(incidentNum);
   if (!entry) {
-    entry = { messages: [], timer: null };
+    entry = { capcodes: new Map(), timer: null };
     incidentBuffer.set(incidentNum, entry);
   }
 
-  entry.messages.push({ ...msg });
+  // Track messages per capcode within this incident
+  if (!entry.capcodes.has(msg.capcode)) {
+    entry.capcodes.set(msg.capcode, []);
+  }
+  entry.capcodes.get(msg.capcode).push({ ...msg });
 
   // Reset the timer each time a new fragment arrives
   if (entry.timer) clearTimeout(entry.timer);
   entry.timer = setTimeout(() => {
     incidentBuffer.delete(incidentNum);
-    // Pick the message with the longest content (most complete version)
-    const best = entry.messages.reduce((a, b) =>
-      (b.content || '').length > (a.content || '').length ? b : a
-    );
-    best.is_multipart = true;
-    best.multipart_id = incidentNum;
-    insertAndBroadcast(best);
+    // For each unique capcode, pick the longest message and insert it
+    for (const [capcode, messages] of entry.capcodes) {
+      const best = messages.reduce((a, b) =>
+        (b.content || '').length > (a.content || '').length ? b : a
+      );
+      best.is_multipart = true;
+      best.multipart_id = incidentNum;
+      insertAndBroadcast(best);
+    }
   }, INCIDENT_BUFFER_MS);
 
   return { buffered: true };
@@ -845,15 +851,15 @@ function bufferByIncident(msg) {
  */
 function insertAndBroadcast(msg) {
   // Content prefix dedup: for FLEX messages, check if a longer/equal message
-  // with the same content prefix already exists (catches cross-capcode fragments)
+  // with the same content prefix AND same capcode already exists
   const content = (msg.content || '').trim();
   if (content.length >= 25 && msg.protocol === 'FLEX') {
     const prefix = content.substring(0, 25).replace(/%/g, '\\%').replace(/_/g, '\\_');
     const existingByContent = db.prepare(
-      "SELECT LENGTH(content) as len FROM messages WHERE content LIKE ? ESCAPE '\\' AND received_at > datetime('now', '-120 seconds') ORDER BY LENGTH(content) DESC LIMIT 1"
-    ).get(prefix + '%');
+      "SELECT LENGTH(content) as len FROM messages WHERE capcode = ? AND content LIKE ? ESCAPE '\\' AND received_at > datetime('now', '-120 seconds') ORDER BY LENGTH(content) DESC LIMIT 1"
+    ).get(msg.capcode, prefix + '%');
     if (existingByContent && existingByContent.len >= content.length) {
-      return null; // Already have a better or equal version in DB
+      return null; // Already have a better or equal version in DB for this capcode
     }
   }
 
