@@ -205,6 +205,34 @@ db.exec(`
   );
 `);
 
+// Error log table (admin-visible server-side errors)
+db.exec(`
+  CREATE TABLE IF NOT EXISTS error_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    level TEXT NOT NULL DEFAULT 'error',
+    source TEXT NOT NULL,
+    message TEXT NOT NULL,
+    stack TEXT,
+    context TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE INDEX IF NOT EXISTS idx_error_log_created ON error_log(created_at);
+`);
+
+// ─── Performance indexes ───
+// push_subscriptions: queried by user_id frequently
+db.exec('CREATE INDEX IF NOT EXISTS idx_push_subs_user ON push_subscriptions(user_id)');
+// user_filters: queried by user_id
+db.exec('CREATE INDEX IF NOT EXISTS idx_user_filters_user ON user_filters(user_id)');
+// silenced_capcodes: queried by capcode in sendPushForMessage
+db.exec('CREATE INDEX IF NOT EXISTS idx_silenced_capcodes_capcode ON silenced_capcodes(capcode)');
+// keyword_alerts: queried by notify for push matching
+db.exec('CREATE INDEX IF NOT EXISTS idx_keyword_alerts_notify ON keyword_alerts(notify)');
+// messages: content search (partial - helps with prefix matching)
+db.exec('CREATE INDEX IF NOT EXISTS idx_messages_content ON messages(content)');
+// notification_log: capcode for filtering
+db.exec('CREATE INDEX IF NOT EXISTS idx_notification_log_capcode ON notification_log(capcode)');
+
 // Add group_id column to keyword_alerts for scoping keywords to groups
 try {
   db.exec("ALTER TABLE keyword_alerts ADD COLUMN group_id INTEGER DEFAULT NULL REFERENCES groups_(id) ON DELETE SET NULL");

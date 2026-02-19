@@ -5,14 +5,17 @@ const { WebSocketServer } = require('ws');
 const jwt = require('jsonwebtoken');
 const config = require('./config');
 const { router, setBroadcast } = require('./routes');
+const { logError, pruneOldLogs } = require('./logger');
 
 // ─── Uncaught error handlers (ensures docker logs captures crashes) ───
 process.on('uncaughtException', (err) => {
   console.error('UNCAUGHT EXCEPTION:', err.stack || err.message || err);
+  try { logError('process', err); } catch { /* last resort */ }
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {
   console.error('UNHANDLED REJECTION:', reason);
+  try { logError('process.unhandledRejection', reason instanceof Error ? reason : new Error(String(reason))); } catch { /* ignore */ }
 });
 
 const app = express();
@@ -128,6 +131,7 @@ wss.on('connection', (ws, req) => {
 
   ws.on('error', (err) => {
     console.error('WS error:', err.message);
+    logError('ws.client', err, { userId });
   });
 
   // Send initial connection ack
@@ -162,6 +166,15 @@ const heartbeat = setInterval(() => {
 
 wss.on('close', () => clearInterval(heartbeat));
 
+// ─── Periodic DB maintenance (prune old logs every 6 hours) ───
+const pruneInterval = setInterval(() => {
+  try { pruneOldLogs(); } catch { /* ignore */ }
+}, 6 * 60 * 60 * 1000);
+// Also prune once on startup (after a short delay)
+setTimeout(() => {
+  try { pruneOldLogs(); } catch { /* ignore */ }
+}, 10000);
+
 // Start server
 server.listen(config.PORT, config.HOST, () => {
   console.log(`PDW Monitor running on http://${config.HOST}:${config.PORT}`);
@@ -175,6 +188,9 @@ server.listen(config.PORT, config.HOST, () => {
 // ─── Graceful shutdown ───
 function shutdown(signal) {
   console.log(`\n${signal} received. Shutting down gracefully...`);
+
+  // Stop periodic tasks
+  clearInterval(pruneInterval);
 
   // Stop accepting new connections
   server.close(() => {

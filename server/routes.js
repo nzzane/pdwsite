@@ -4,6 +4,7 @@ const db = require('./db');
 const config = require('./config');
 const parser = require('./parser');
 const webpush = require('web-push');
+const { logError, logWarn } = require('./logger');
 
 const router = express.Router();
 
@@ -136,6 +137,43 @@ router.post('/api/admin/settings/regenerate-api-key', requireAuth, requireAdmin,
   const newKey = 'pdw_' + crypto.randomBytes(24).toString('base64url');
   db.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('api_key', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')").run(newKey, newKey);
   res.json({ api_key: newKey });
+});
+
+// ─── Admin: error log ───
+
+router.get('/api/admin/error-log', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const level = req.query.level || null;
+
+    let sql = 'SELECT * FROM error_log';
+    const params = [];
+    if (level) {
+      sql += ' WHERE level = ?';
+      params.push(level);
+    }
+    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const logs = db.prepare(sql).all(...params);
+    const total = db.prepare(
+      level ? 'SELECT COUNT(*) as c FROM error_log WHERE level = ?' : 'SELECT COUNT(*) as c FROM error_log'
+    ).get(...(level ? [level] : [])).c;
+
+    res.json({ logs, total });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch error log' });
+  }
+});
+
+router.delete('/api/admin/error-log', requireAuth, requireAdmin, (req, res) => {
+  try {
+    db.prepare('DELETE FROM error_log').run();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to clear error log' });
+  }
 });
 
 // ─── Messages ───
@@ -392,8 +430,36 @@ router.post('/api/aliases', requireAuth, requireAdmin, (req, res) => {
       }
     }
 
+    // Backfill call_type and location on past messages matching this capcode
+    if (call_type || location) {
+      try {
+        const backfillSql = [];
+        const backfillParams = [];
+        if (call_type) {
+          backfillSql.push('call_type = COALESCE(call_type, ?)');
+          backfillParams.push(call_type);
+        }
+        if (location) {
+          backfillSql.push('location = COALESCE(location, ?)');
+          backfillParams.push(location);
+        }
+        if (backfillSql.length > 0) {
+          // Match both raw capcode and normalized (FLEX leading zeros)
+          db.prepare(
+            `UPDATE messages SET ${backfillSql.join(', ')} WHERE (capcode = ? OR LTRIM(capcode, '0') = ?)`
+          ).run(...backfillParams, normCapcode, normCapcode);
+        }
+      } catch (err) {
+        logError('alias.backfill', err, { capcode: normCapcode });
+      }
+    }
+
+    // Broadcast alias update so all connected clients refresh
+    broadcast({ type: 'alias_updated', data: { capcode: normCapcode } });
+
     res.json({ ok: true });
   } catch (err) {
+    logError('alias.save', err, { capcode: req.body.capcode });
     res.status(500).json({ error: 'Failed to save alias' });
   }
 });
@@ -519,7 +585,15 @@ router.post('/api/push/test', requireAuth, (req, res) => {
   let failed = 0;
   const errors = [];
   Promise.allSettled(subs.map(sub => {
-    const subscription = { endpoint: sub.endpoint, keys: JSON.parse(sub.keys_json) };
+    let subscription;
+    try {
+      subscription = { endpoint: sub.endpoint, keys: JSON.parse(sub.keys_json) };
+    } catch (parseErr) {
+      failed++;
+      errors.push('Invalid subscription data');
+      db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+      return Promise.resolve();
+    }
     return webpush.sendNotification(subscription, payload)
       .then(() => { sent++; })
       .catch((err) => {
@@ -531,6 +605,9 @@ router.post('/api/push/test', requireAuth, (req, res) => {
       });
   })).then(() => {
     res.json({ sent, failed, errors, total_subscriptions: subs.length });
+  }).catch((err) => {
+    logError('push.test', err);
+    res.status(500).json({ error: 'Push test failed: ' + err.message });
   });
 });
 
@@ -885,6 +962,7 @@ router.post('/api/ingest', requireApiKey, (req, res) => {
     res.json({ inserted: inserted.length });
   } catch (err) {
     console.error('Ingest error:', err);
+    logError('ingest', err);
     res.status(500).json({ error: 'Ingestion failed' });
   }
 });
@@ -1085,15 +1163,21 @@ function sendPushForMessage(msg) {
 
 function sendToSubscriptions(subs, payload) {
   for (const sub of subs) {
-    const subscription = {
-      endpoint: sub.endpoint,
-      keys: JSON.parse(sub.keys_json),
-    };
-    webpush.sendNotification(subscription, payload).catch((err) => {
-      if (err.statusCode === 410 || err.statusCode === 404) {
-        db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
-      }
-    });
+    try {
+      const subscription = {
+        endpoint: sub.endpoint,
+        keys: JSON.parse(sub.keys_json),
+      };
+      webpush.sendNotification(subscription, payload).catch((err) => {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+        }
+      });
+    } catch (err) {
+      logError('push.sendToSubscriptions', err, { endpoint: sub.endpoint });
+      // Remove broken subscription
+      db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+    }
   }
 }
 

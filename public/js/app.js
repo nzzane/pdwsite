@@ -8,6 +8,9 @@
     user: null,
     ws: null,
     wsReconnectTimer: null,
+    wsReconnectDelay: 1000,
+    wsPingInterval: null,
+    timeAgoInterval: null,
     messages: [],
     maxLiveMessages: 500,
     paused: false,
@@ -468,6 +471,12 @@
   function connectWs() {
     if (state.ws && state.ws.readyState <= 1) return;
 
+    // Clear any existing ping interval from a previous connection
+    if (state.wsPingInterval) {
+      clearInterval(state.wsPingInterval);
+      state.wsPingInterval = null;
+    }
+
     const proto = location.protocol === 'https:' ? 'wss' : 'ws';
     state.ws = new WebSocket(`${proto}://${location.host}/ws`);
     const statusDot = $('#connection-status');
@@ -475,6 +484,8 @@
     statusDot.title = 'Connecting...';
 
     state.ws.onopen = () => {
+      // Reset reconnect delay on successful connection
+      state.wsReconnectDelay = 1000;
       // Authenticate
       state.ws.send(JSON.stringify({ type: 'auth', token: state.token }));
     };
@@ -499,15 +510,26 @@
         if (msg.type === 'message' && msg.data) {
           handleNewMessage(msg.data);
         }
-      } catch { /* ignore */ }
+
+        // Handle alias update broadcast — refresh aliases and re-render live messages
+        if (msg.type === 'alias_updated') {
+          refreshAliasesAndRerender();
+        }
+      } catch { /* ignore malformed messages */ }
     };
 
     state.ws.onclose = () => {
       statusDot.className = 'status-dot disconnected';
       statusDot.title = 'Disconnected';
-      // Reconnect
+      // Clear ping interval
+      if (state.wsPingInterval) {
+        clearInterval(state.wsPingInterval);
+        state.wsPingInterval = null;
+      }
+      // Reconnect with exponential backoff (1s, 2s, 4s, 8s... max 30s)
       if (state.token) {
-        state.wsReconnectTimer = setTimeout(connectWs, 3000);
+        state.wsReconnectTimer = setTimeout(connectWs, state.wsReconnectDelay);
+        state.wsReconnectDelay = Math.min(state.wsReconnectDelay * 2, 30000);
       }
     };
 
@@ -515,19 +537,43 @@
       state.ws.close();
     };
 
-    // Keepalive
-    const pingInterval = setInterval(() => {
+    // Keepalive — stored on state so it gets cleaned up properly
+    state.wsPingInterval = setInterval(() => {
       if (state.ws && state.ws.readyState === 1) {
         state.ws.send(JSON.stringify({ type: 'ping' }));
       } else {
-        clearInterval(pingInterval);
+        clearInterval(state.wsPingInterval);
+        state.wsPingInterval = null;
       }
     }, 25000);
   }
 
   function disconnectWs() {
     if (state.wsReconnectTimer) clearTimeout(state.wsReconnectTimer);
+    state.wsReconnectTimer = null;
+    if (state.wsPingInterval) {
+      clearInterval(state.wsPingInterval);
+      state.wsPingInterval = null;
+    }
+    state.wsReconnectDelay = 1000;
     if (state.ws) state.ws.close();
+  }
+
+  // ─── Refresh aliases from server and re-render live messages ───
+  async function refreshAliasesAndRerender() {
+    try {
+      const updatedAliases = await api('/api/aliases');
+      state.aliases = {};
+      for (const a of updatedAliases) state.aliases[a.capcode] = a;
+      // Re-render all visible live messages with updated alias data
+      const list = $('#message-list');
+      if (list && state.messages.length > 0) {
+        list.innerHTML = '';
+        for (const msg of state.messages) {
+          list.appendChild(renderMessageCard(msg));
+        }
+      }
+    } catch { /* ignore - will pick up aliases on next load */ }
   }
 
   // ─── Handle new live message ───
@@ -1598,6 +1644,43 @@
       } catch (err) {
         el.innerHTML = `<p>Error: ${esc(err.message)}</p>`;
       }
+    } else if (tab === 'logs') {
+      try {
+        const data = await api('/api/admin/error-log?limit=100');
+        el.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.75rem;flex-wrap:wrap;gap:0.5rem">
+            <span style="font-size:0.85rem;color:var(--text-dim)">${data.total} total log entries</span>
+            <button class="btn btn-sm btn-danger" id="btn-clear-logs">Clear All Logs</button>
+          </div>
+          ${data.logs.length === 0 ? '<p style="color:var(--text-dim);text-align:center;padding:2rem 0">No errors logged</p>' : `
+          <div class="log-list">
+            ${data.logs.map(log => `
+              <div class="log-entry log-${esc(log.level)}">
+                <div class="log-header">
+                  <span class="log-level-badge log-level-${esc(log.level)}">${esc(log.level.toUpperCase())}</span>
+                  <span class="log-source">${esc(log.source)}</span>
+                  <span class="log-time">${formatDateTime(log.created_at)}</span>
+                </div>
+                <div class="log-message">${esc(log.message)}</div>
+                ${log.stack ? `<details class="log-stack"><summary>Stack trace</summary><pre>${esc(log.stack)}</pre></details>` : ''}
+                ${log.context ? `<details class="log-context"><summary>Context</summary><pre>${esc(log.context)}</pre></details>` : ''}
+              </div>
+            `).join('')}
+          </div>`}
+        `;
+        el.querySelector('#btn-clear-logs').onclick = async () => {
+          if (!confirm('Clear all error logs?')) return;
+          try {
+            await api('/api/admin/error-log', { method: 'DELETE' });
+            toast('Logs cleared', 'success');
+            loadAdminTab('logs');
+          } catch (err) {
+            toast('Failed to clear: ' + err.message, 'error');
+          }
+        };
+      } catch (err) {
+        el.innerHTML = `<p>Error: ${esc(err.message)}</p>`;
+      }
     }
   }
 
@@ -1711,10 +1794,8 @@
             hidden: $('#alias-hidden').checked,
           })
         });
-        // Refresh aliases in state
-        const updatedAliases = await api('/api/aliases');
-        state.aliases = {};
-        for (const a of updatedAliases) state.aliases[a.capcode] = a;
+        // Refresh aliases in state and re-render live messages
+        await refreshAliasesAndRerender();
         hideModal();
         if (state.currentView === 'admin') loadAdminTab('aliases');
         toast('Alias saved', 'success');
@@ -2087,6 +2168,11 @@
     state.user = null;
     localStorage.removeItem('pdw_token');
     disconnectWs();
+    // Clear time-ago interval to prevent memory leak
+    if (state.timeAgoInterval) {
+      clearInterval(state.timeAgoInterval);
+      state.timeAgoInterval = null;
+    }
     $('#login-screen').classList.add('active');
     $('#app-screen').classList.remove('active');
     $('#login-error').classList.add('hidden');
@@ -2386,8 +2472,8 @@
       if (e.target === e.currentTarget) hideModal();
     });
 
-    // Update time-ago labels periodically
-    setInterval(() => {
+    // Update time-ago labels periodically (stored on state for cleanup)
+    state.timeAgoInterval = setInterval(() => {
       $$('.msg-time').forEach(el => {
         const card = el.closest('.msg-card');
         if (!card) return;
