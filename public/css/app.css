@@ -137,8 +137,27 @@ a:hover { text-decoration: underline; }
   flex-shrink: 0;
 }
 .btn-filter-icon:hover { background: var(--bg-hover); color: var(--text); }
-#btn-clear-filters:hover { border-color: var(--danger); color: var(--danger); }
 #btn-save-filter:hover { border-color: var(--primary); color: var(--primary); }
+
+/* Clear filters button - more visible than a plain icon */
+.btn-clear-filters {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem 0.625rem;
+  height: 30px;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+  border-radius: var(--radius-sm);
+  background: rgba(239, 68, 68, 0.08);
+  color: #f87171;
+  font-size: 0.75rem;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.btn-clear-filters:hover { background: rgba(239, 68, 68, 0.18); border-color: var(--danger); color: var(--danger); }
 
 /* ─── Top Bar ─── */
 .topbar {
@@ -960,6 +979,15 @@ a:hover { text-decoration: underline; }
   cursor: pointer;
 }
 .checkbox-label input { margin: 0; }
+
+/* ─── Notification click highlight flash ─── */
+.msg-card.highlight-flash {
+  animation: highlight-pulse 3s ease-out;
+}
+@keyframes highlight-pulse {
+  0% { box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.7); background: rgba(59, 130, 246, 0.15); }
+  100% { box-shadow: 0 0 0 0 transparent; background: var(--bg-card); }
+}
 
 /* ─── Admin error log ─── */
 .log-list {

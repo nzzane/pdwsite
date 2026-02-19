@@ -615,16 +615,32 @@ router.post('/api/push/test', requireAuth, (req, res) => {
 
 router.get('/api/alarm-level-alert', requireAuth, (req, res) => {
   const user = db.prepare('SELECT min_alarm_level FROM users WHERE id = ?').get(req.user.id);
-  res.json({ min_alarm_level: user ? user.min_alarm_level : null });
+  const groups = db.prepare('SELECT group_id FROM alarm_level_groups WHERE user_id = ?').all(req.user.id);
+  res.json({
+    min_alarm_level: user ? user.min_alarm_level : null,
+    group_ids: groups.map(g => g.group_id),
+  });
 });
 
 router.put('/api/alarm-level-alert', requireAuth, (req, res) => {
-  const { min_alarm_level } = req.body;
+  const { min_alarm_level, group_ids } = req.body;
   const level = min_alarm_level ? parseInt(min_alarm_level, 10) : null;
   if (level !== null && (level < 2 || level > 5)) {
     return res.status(400).json({ error: 'Alarm level must be between 2 and 5' });
   }
   db.prepare('UPDATE users SET min_alarm_level = ? WHERE id = ?').run(level, req.user.id);
+
+  // Update alarm level group scoping
+  if (Array.isArray(group_ids)) {
+    db.prepare('DELETE FROM alarm_level_groups WHERE user_id = ?').run(req.user.id);
+    if (group_ids.length > 0) {
+      const insert = db.prepare('INSERT OR IGNORE INTO alarm_level_groups (user_id, group_id) VALUES (?, ?)');
+      for (const gid of group_ids) {
+        insert.run(req.user.id, parseInt(gid, 10));
+      }
+    }
+  }
+
   res.json({ ok: true, min_alarm_level: level });
 });
 
@@ -1142,6 +1158,15 @@ function sendPushForMessage(msg) {
           `SELECT 1 FROM user_favourites WHERE user_id = ? AND group_id IN (${groups.map(() => '?').join(',')}) AND notify = 1 LIMIT 1`
         ).get(user.id, ...groups.map(g => g.id)));
       if (alreadyNotified) continue;
+
+      // Check alarm level group scoping: if user has specific groups set,
+      // only alert if the message belongs to one of those groups
+      const userAlarmGroups = db.prepare('SELECT group_id FROM alarm_level_groups WHERE user_id = ?').all(user.id);
+      if (userAlarmGroups.length > 0) {
+        const allowedGroupIds = new Set(userAlarmGroups.map(g => g.group_id));
+        const msgInAllowedGroup = groups.some(g => allowedGroupIds.has(g.id));
+        if (!msgInAllowedGroup) continue;
+      }
 
       const subs = db.prepare('SELECT endpoint, keys_json FROM push_subscriptions WHERE user_id = ?').all(user.id);
       if (subs.length === 0) continue;

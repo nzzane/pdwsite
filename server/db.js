@@ -240,6 +240,18 @@ try {
   // Column already exists, ignore
 }
 
+// Alarm level alert group scoping (per-user, multi-select groups)
+// Empty table = nationwide (all groups). Rows = restrict to specific groups.
+db.exec(`
+  CREATE TABLE IF NOT EXISTS alarm_level_groups (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    group_id INTEGER NOT NULL REFERENCES groups_(id) ON DELETE CASCADE,
+    UNIQUE(user_id, group_id)
+  );
+  CREATE INDEX IF NOT EXISTS idx_alarm_level_groups_user ON alarm_level_groups(user_id);
+`);
+
 // Normalize capcodes: strip leading zeros for consistent matching across FLEX/POCSAG
 try {
   db.exec("UPDATE group_members SET capcode = CASE WHEN LENGTH(LTRIM(capcode, '0')) = 0 THEN '0' ELSE LTRIM(capcode, '0') END WHERE capcode LIKE '0%'");

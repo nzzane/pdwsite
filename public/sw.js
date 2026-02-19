@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pdw-v11';
+const CACHE_NAME = 'pdw-v12';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/icons/icon-192.png',
@@ -97,16 +97,22 @@ self.addEventListener('notificationclick', (event) => {
 
   if (event.action === 'dismiss') return;
 
+  const messageId = event.notification.data?.messageId;
+
   event.waitUntil(
     self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
-      // Focus existing window if available
+      // Focus existing window if available and send it the messageId to scroll to
       for (const client of clients) {
         if (client.url.includes(self.location.origin) && 'focus' in client) {
+          if (messageId) {
+            client.postMessage({ type: 'navigate_to_message', messageId });
+          }
           return client.focus();
         }
       }
-      // Otherwise open new window
-      return self.clients.openWindow('/');
+      // Otherwise open new window with messageId hash
+      const url = messageId ? `/?msg=${messageId}` : '/';
+      return self.clients.openWindow(url);
     })
   );
 });

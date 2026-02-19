@@ -11,6 +11,7 @@
     wsReconnectDelay: 1000,
     wsPingInterval: null,
     timeAgoInterval: null,
+    autoRefreshInterval: null,
     messages: [],
     maxLiveMessages: 500,
     paused: false,
@@ -26,9 +27,11 @@
     searchPage: 0,
     searchLimit: 50,
     alarmLevelSetting: null, // null = off, 2-5 = minimum alarm level
+    alarmLevelGroups: [], // group IDs for alarm level scoping (empty = all/nationwide)
     preferences: { default_view: 'live', default_group_id: null, default_keyword: null },
     silencedCapcodes: [],
     notifTab: 'settings', // 'settings', 'history', or 'display'
+    pendingMessageId: null, // messageId to scroll to after load (from notification click)
   };
 
   // ─── Call type categories ───
@@ -261,9 +264,24 @@
     if (!matched && state.alarmLevelSetting) {
       const alarmLevel = msg.alarm_level || extractAlarmLevel(msg.content);
       if (alarmLevel && alarmLevel >= state.alarmLevelSetting) {
-        matched = true;
-        const ordinal = alarmLevel === 2 ? '2nd' : alarmLevel === 3 ? '3rd' : `${alarmLevel}th`;
-        matchReason = `${ordinal} Alarm`;
+        // If user has scoped alarm alerts to specific groups, check membership
+        let alarmGroupMatch = true;
+        if (state.alarmLevelGroups && state.alarmLevelGroups.length > 0) {
+          alarmGroupMatch = false;
+          const normCap2 = normalizeCapcode(msg.capcode);
+          const msgContent = (msg.content || '').toLowerCase();
+          for (const gid of state.alarmLevelGroups) {
+            const group = state.groups.find(g => g.id === gid);
+            if (!group) continue;
+            if (group.members && group.members.some(m => normalizeCapcode(m.capcode) === normCap2)) { alarmGroupMatch = true; break; }
+            if (group.keywords && group.keywords.some(kw => msgContent.includes(kw.keyword.toLowerCase()))) { alarmGroupMatch = true; break; }
+          }
+        }
+        if (alarmGroupMatch) {
+          matched = true;
+          const ordinal = alarmLevel === 2 ? '2nd' : alarmLevel === 3 ? '3rd' : `${alarmLevel}th`;
+          matchReason = `${ordinal} Alarm`;
+        }
       }
     }
 
@@ -576,6 +594,27 @@
     } catch { /* ignore - will pick up aliases on next load */ }
   }
 
+  // ─── Navigate to a specific message (from notification click) ───
+  function navigateToMessage(messageId) {
+    // Switch to live view
+    if (state.currentView !== 'live') switchView('live');
+    state.paused = false;
+    $('#btn-pause').textContent = 'Pause';
+
+    // Try to find in current messages
+    const card = document.querySelector(`.msg-card[data-id="${messageId}"]`);
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      card.classList.add('highlight-flash');
+      setTimeout(() => card.classList.remove('highlight-flash'), 3000);
+      return;
+    }
+
+    // Not in current feed - store and load, then try to find
+    state.pendingMessageId = messageId;
+    loadRecentMessages();
+  }
+
   // ─── Handle new live message ───
   function handleNewMessage(msg) {
     // Flash the status dot to indicate incoming data
@@ -734,6 +773,7 @@
       state.filters = filters;
       state.keywordAlerts = keywordAlerts;
       state.alarmLevelSetting = alarmLevelData.min_alarm_level || null;
+      state.alarmLevelGroups = alarmLevelData.group_ids || [];
       state.preferences = prefs;
       state.silencedCapcodes = silenced;
 
@@ -777,6 +817,20 @@
       state.messages = msgs;
       for (const msg of state.messages) {
         list.appendChild(renderMessageCard(msg));
+      }
+
+      // If we have a pending messageId from notification click, scroll to it
+      if (state.pendingMessageId) {
+        const msgId = state.pendingMessageId;
+        state.pendingMessageId = null;
+        requestAnimationFrame(() => {
+          const card = document.querySelector(`.msg-card[data-id="${msgId}"]`);
+          if (card) {
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            card.classList.add('highlight-flash');
+            setTimeout(() => card.classList.remove('highlight-flash'), 3000);
+          }
+        });
       }
     } catch (err) {
       toast('Failed to load messages', 'error');
@@ -1230,6 +1284,10 @@
       { val: '4', label: '4th Alarm and above' },
       { val: '5', label: '5th Alarm only' },
     ];
+    const alarmGroupsHtml = state.groups.map(g => {
+      const checked = state.alarmLevelGroups.includes(g.id) ? 'checked' : '';
+      return `<label class="checkbox-label"><input type="checkbox" value="${g.id}" class="alarm-group-cb" ${checked}> <span class="colour-dot" style="background:${esc(g.colour)}"></span>${esc(g.name)}</label>`;
+    }).join('');
 
     // Silenced capcodes
     const silencedHtml = state.silencedCapcodes.length === 0
@@ -1291,6 +1349,14 @@
         <select id="notif-alarm-level" class="filter-select" style="width:100%">
           ${alarmOptions.map(o => `<option value="${o.val}" ${o.val === String(alarmVal) ? 'selected' : ''}>${o.label}</option>`).join('')}
         </select>
+        <div id="alarm-group-scope" style="margin-top:0.75rem;${!alarmVal ? 'display:none' : ''}">
+          <p style="font-size:0.75rem;color:var(--text-muted);margin-bottom:0.375rem">
+            Regions to monitor (leave all unchecked for nationwide):
+          </p>
+          <div class="checkbox-group">
+            ${alarmGroupsHtml || '<span style="color:var(--text-muted);font-size:0.8rem">No groups created yet</span>'}
+          </div>
+        </div>
       </div>
 
       <div class="notif-section">
@@ -1346,20 +1412,48 @@
     });
 
     // Bind alarm level
-    container.querySelector('#notif-alarm-level').addEventListener('change', async (e) => {
+    const alarmLevelSelect = container.querySelector('#notif-alarm-level');
+    const alarmGroupScope = container.querySelector('#alarm-group-scope');
+
+    alarmLevelSelect.addEventListener('change', async (e) => {
       const level = e.target.value || null;
+      // Show/hide group scope section
+      if (alarmGroupScope) {
+        alarmGroupScope.style.display = level ? '' : 'none';
+      }
+      const groupIds = Array.from(container.querySelectorAll('.alarm-group-cb:checked')).map(cb => parseInt(cb.value, 10));
       try {
         await api('/api/alarm-level-alert', {
           method: 'PUT',
-          body: JSON.stringify({ min_alarm_level: level }),
+          body: JSON.stringify({ min_alarm_level: level, group_ids: groupIds }),
         });
         state.alarmLevelSetting = level ? parseInt(level, 10) : null;
+        state.alarmLevelGroups = groupIds;
         const sidebarSelect = $('#alarm-level-select');
         if (sidebarSelect) sidebarSelect.value = level || '';
         toast('Alarm level updated', 'success');
       } catch (err) {
         toast('Failed to update: ' + err.message, 'error');
       }
+    });
+
+    // Bind alarm group checkboxes - save on change
+    container.querySelectorAll('.alarm-group-cb').forEach(cb => {
+      cb.addEventListener('change', async () => {
+        const level = alarmLevelSelect.value || null;
+        if (!level) return; // Don't save groups if alarm level is off
+        const groupIds = Array.from(container.querySelectorAll('.alarm-group-cb:checked')).map(c => parseInt(c.value, 10));
+        try {
+          await api('/api/alarm-level-alert', {
+            method: 'PUT',
+            body: JSON.stringify({ min_alarm_level: level, group_ids: groupIds }),
+          });
+          state.alarmLevelGroups = groupIds;
+          toast('Alarm regions updated', 'success');
+        } catch (err) {
+          toast('Failed to update: ' + err.message, 'error');
+        }
+      });
     });
 
     // Bind unsilence buttons
@@ -2168,10 +2262,14 @@
     state.user = null;
     localStorage.removeItem('pdw_token');
     disconnectWs();
-    // Clear time-ago interval to prevent memory leak
+    // Clear intervals to prevent memory leaks
     if (state.timeAgoInterval) {
       clearInterval(state.timeAgoInterval);
       state.timeAgoInterval = null;
+    }
+    if (state.autoRefreshInterval) {
+      clearInterval(state.autoRefreshInterval);
+      state.autoRefreshInterval = null;
     }
     $('#login-screen').classList.add('active');
     $('#app-screen').classList.remove('active');
@@ -2204,6 +2302,14 @@
       $('#filter-group').value = state.preferences.default_group_id;
       applyFilters();
     }
+
+    // Auto-refresh live messages every 30s (catches missed WS messages)
+    if (state.autoRefreshInterval) clearInterval(state.autoRefreshInterval);
+    state.autoRefreshInterval = setInterval(() => {
+      if (state.currentView === 'live' && !state.paused && !document.hidden) {
+        applyFilters(); // Uses current filter state including group/search/type filters
+      }
+    }, 30000);
 
     // Auto-subscribe to push if permission already granted (ensures background notifications work)
     autoSubscribePush();
@@ -2350,17 +2456,17 @@
       }
       // Switch to default view
       const defaultView = state.preferences.default_view || 'live';
-      switchView(defaultView);
       // Close panels
       closeSidebar();
       hideDetail();
       // Un-pause if paused
       state.paused = false;
       $('#btn-pause').textContent = 'Pause';
-      // Force reload messages if going to live
+      // Switch view (triggers reload for stats/search/etc)
+      switchView(defaultView);
+      // Always reload messages for live view (even if already on live)
       if (defaultView === 'live') {
         applyFilters();
-        loadRecentMessages();
       }
     });
 
@@ -2438,7 +2544,10 @@
     $('#alarm-level-select').addEventListener('change', async (e) => {
       const val = e.target.value ? parseInt(e.target.value, 10) : null;
       try {
-        await api('/api/alarm-level-alert', { method: 'PUT', body: JSON.stringify({ min_alarm_level: val }) });
+        await api('/api/alarm-level-alert', {
+          method: 'PUT',
+          body: JSON.stringify({ min_alarm_level: val, group_ids: state.alarmLevelGroups }),
+        });
         state.alarmLevelSetting = val;
         if (val) {
           const ordinal = val === 2 ? '2nd' : val === 3 ? '3rd' : `${val}th`;
@@ -2563,6 +2672,24 @@
     bindEvents();
     setupPullToRefresh();
     registerSW();
+
+    // Listen for SW messages (notification click -> navigate to message)
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.addEventListener('message', (event) => {
+        if (event.data && event.data.type === 'navigate_to_message' && event.data.messageId) {
+          navigateToMessage(event.data.messageId);
+        }
+      });
+    }
+
+    // Check URL params for ?msg= (app opened fresh from notification click)
+    const urlParams = new URLSearchParams(window.location.search);
+    const msgParam = urlParams.get('msg');
+    if (msgParam) {
+      state.pendingMessageId = parseInt(msgParam, 10);
+      // Clean URL without reload
+      window.history.replaceState({}, '', '/');
+    }
 
     // Keep CSS variables in sync on resize / orientation change (critical for iOS Safari)
     window.addEventListener('resize', () => { updateAppHeight(); updateTopbarHeight(); });
