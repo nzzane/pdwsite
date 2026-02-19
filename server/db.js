@@ -260,4 +260,11 @@ try {
   // Migration may fail on duplicate after normalization, that's ok
 }
 
+// Add default_region column to user_preferences
+try {
+  db.exec("ALTER TABLE user_preferences ADD COLUMN default_region TEXT DEFAULT NULL");
+} catch (e) {
+  // Column already exists, ignore
+}
+
 module.exports = db;

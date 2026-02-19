@@ -28,7 +28,7 @@
     searchLimit: 50,
     alarmLevelSetting: null, // null = off, 2-5 = minimum alarm level
     alarmLevelGroups: [], // group IDs for alarm level scoping (empty = all/nationwide)
-    preferences: { default_view: 'live', default_group_id: null, default_keyword: null },
+    preferences: { default_view: 'live', default_group_id: null, default_keyword: null, default_region: null },
     silencedCapcodes: [],
     notifTab: 'settings', // 'settings', 'history', or 'display'
     pendingMessageId: null, // messageId to scroll to after load (from notification click)
@@ -706,7 +706,7 @@
         ptr.classList.add('refreshing');
         ptr.style.transition = 'height 0.2s ease';
         ptr.style.height = '40px';
-        await loadRecentMessages();
+        await applyFilters();
         ptr.classList.remove('refreshing');
         ptr.style.height = '0px';
         refreshing = false;
@@ -1530,6 +1530,10 @@
       `<option value="${g.id}" ${state.preferences.default_group_id == g.id ? 'selected' : ''}>${esc(g.name)}</option>`
     ).join('');
 
+    const regionOptions = (state.regions || []).map(r =>
+      `<option value="${r.name}" ${state.preferences.default_region === r.name ? 'selected' : ''}>${esc(r.name)}</option>`
+    ).join('');
+
     container.innerHTML = `
       <div class="notif-section">
         <h3>Default View</h3>
@@ -1552,6 +1556,14 @@
             ${groupOptions}
           </select>
         </div>
+        <div class="pref-row">
+          <label>Default region filter</label>
+          <select id="pref-default-region" class="filter-select">
+            <option value="">None (all regions)</option>
+            ${regionOptions}
+          </select>
+          <p style="font-size:0.75rem;color:var(--text-muted);margin-top:0.25rem">Region filter applies alongside group filter</p>
+        </div>
       </div>
     `;
 
@@ -1561,6 +1573,10 @@
     });
     container.querySelector('#pref-default-group').addEventListener('change', async (e) => {
       state.preferences.default_group_id = e.target.value || null;
+      await savePreferences();
+    });
+    container.querySelector('#pref-default-region').addEventListener('change', async (e) => {
+      state.preferences.default_region = e.target.value || null;
       await savePreferences();
     });
   }
@@ -2328,8 +2344,16 @@
     if (state.preferences.default_view && state.preferences.default_view !== 'live') {
       switchView(state.preferences.default_view);
     }
+    let hasDefaultFilter = false;
     if (state.preferences.default_group_id) {
       $('#filter-group').value = state.preferences.default_group_id;
+      hasDefaultFilter = true;
+    }
+    if (state.preferences.default_region) {
+      $('#filter-region').value = state.preferences.default_region;
+      hasDefaultFilter = true;
+    }
+    if (hasDefaultFilter) {
       applyFilters();
     }
 
@@ -2481,9 +2505,12 @@
       $('#filter-trucks').value = '';
       $('#filter-group').value = '';
       if ($('#filter-hide-test')) $('#filter-hide-test').checked = true;
-      // Apply default group filter if set
+      // Apply default group and region filters if set
       if (state.preferences.default_group_id) {
         $('#filter-group').value = state.preferences.default_group_id;
+      }
+      if (state.preferences.default_region) {
+        $('#filter-region').value = state.preferences.default_region;
       }
       // Switch to default view
       const defaultView = state.preferences.default_view || 'live';

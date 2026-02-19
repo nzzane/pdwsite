@@ -672,20 +672,21 @@ router.put('/api/alarm-level-alert', requireAuth, (req, res) => {
 
 router.get('/api/preferences', requireAuth, (req, res) => {
   const prefs = db.prepare('SELECT * FROM user_preferences WHERE user_id = ?').get(req.user.id);
-  res.json(prefs || { default_view: 'live', default_group_id: null, default_keyword: null });
+  res.json(prefs || { default_view: 'live', default_group_id: null, default_keyword: null, default_region: null });
 });
 
 router.put('/api/preferences', requireAuth, (req, res) => {
-  const { default_view, default_group_id, default_keyword } = req.body;
+  const { default_view, default_group_id, default_keyword, default_region } = req.body;
   db.prepare(`
-    INSERT INTO user_preferences (user_id, default_view, default_group_id, default_keyword, updated_at)
-    VALUES (?, ?, ?, ?, datetime('now'))
+    INSERT INTO user_preferences (user_id, default_view, default_group_id, default_keyword, default_region, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(user_id) DO UPDATE SET
       default_view = excluded.default_view,
       default_group_id = excluded.default_group_id,
       default_keyword = excluded.default_keyword,
+      default_region = excluded.default_region,
       updated_at = datetime('now')
-  `).run(req.user.id, default_view || 'live', default_group_id || null, default_keyword || null);
+  `).run(req.user.id, default_view || 'live', default_group_id || null, default_keyword || null, default_region || null);
   res.json({ ok: true });
 });
 
@@ -831,6 +832,18 @@ function bufferByIncident(msg) {
     return { buffered: true }; // Already have a better version in DB for this capcode
   }
 
+  // Smart dedup: if this message has no trucks and a longer message with the
+  // same F-number (any capcode) already exists that contains this content, drop it
+  const trucks = parser.extractTrucks(msg.content);
+  if (!trucks) {
+    const longerExisting = db.prepare(
+      "SELECT content FROM messages WHERE content LIKE ? AND LENGTH(content) > ? AND received_at > datetime('now', '-120 seconds') LIMIT 1"
+    ).get(`%${incidentNum}%`, (msg.content || '').length);
+    if (longerExisting && longerExisting.content.includes((msg.content || '').trim())) {
+      return { buffered: true }; // Partial/summary already covered by a fuller message
+    }
+  }
+
   let entry = incidentBuffer.get(incidentNum);
   if (!entry) {
     entry = { capcodes: new Map(), timer: null };
@@ -847,14 +860,38 @@ function bufferByIncident(msg) {
   if (entry.timer) clearTimeout(entry.timer);
   entry.timer = setTimeout(() => {
     incidentBuffer.delete(incidentNum);
-    // For each unique capcode, pick the longest message and insert it
+    // For each unique capcode, pick the longest message
+    const candidates = [];
     for (const [capcode, messages] of entry.capcodes) {
       const best = messages.reduce((a, b) =>
         (b.content || '').length > (a.content || '').length ? b : a
       );
       best.is_multipart = true;
       best.multipart_id = incidentNum;
-      insertAndBroadcast(best);
+      candidates.push(best);
+    }
+
+    // Smart dedup: drop partial/summary messages whose content is a subset
+    // of a longer message in the same incident and that have no trucks.
+    // This removes alert-only capcodes that echo a shorter version of the
+    // full dispatch (e.g. national alert capcode with no truck info).
+    const toInsert = candidates.filter(msg => {
+      const content = (msg.content || '').trim();
+      const trucks = parser.extractTrucks(content);
+      // If this message has trucks, always keep it
+      if (trucks) return true;
+      // Check if a longer candidate contains this message's content
+      const isSubset = candidates.some(other => {
+        if (other === msg) return false;
+        const otherContent = (other.content || '').trim();
+        return otherContent.length > content.length && otherContent.includes(content);
+      });
+      // Drop if it's a subset of another message and has no trucks
+      return !isSubset;
+    });
+
+    for (const msg of toInsert) {
+      insertAndBroadcast(msg);
     }
   }, INCIDENT_BUFFER_MS);
 
