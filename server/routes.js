@@ -253,10 +253,19 @@ router.get('/api/messages', requireAuth, (req, res) => {
     const regionData = NZ_REGIONS.find(r => r.name === region);
     if (regionData && regionData.terms.length > 0) {
       const termConditions = regionData.terms.map(() => 'm.content LIKE ?');
-      conditions.push(`(${termConditions.join(' OR ')})`);
+      let regionSql = `(${termConditions.join(' OR ')})`;
       for (const term of regionData.terms) {
         params.push(`%${term}%`);
       }
+      // Add exclude conditions to prevent false positives
+      if (regionData.excludes && regionData.excludes.length > 0) {
+        const excludeConditions = regionData.excludes.map(() => 'm.content NOT LIKE ?');
+        regionSql += ` AND ${excludeConditions.join(' AND ')}`;
+        for (const exc of regionData.excludes) {
+          params.push(`%${exc}%`);
+        }
+      }
+      conditions.push(regionSql);
     }
   }
 

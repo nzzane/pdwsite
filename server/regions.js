@@ -1,5 +1,6 @@
 // New Zealand regions with search terms (towns, suburbs, districts) for location filtering.
 // Terms are matched case-insensitively against message content.
+// Excludes prevent false positives from suburb/street names that contain another region's name.
 
 const NZ_REGIONS = [
   {
@@ -54,6 +55,12 @@ const NZ_REGIONS = [
       'Thames-Coromandel District', 'Otorohanga District', 'Waitomo District',
       'Taupo District',
     ],
+    // Cambridge Tce/Terrace is a Wellington CBD street, not Waikato
+    // Hamilton Rd/St are street names in other cities
+    excludes: [
+      'Cambridge Tce', 'Cambridge Terrace',
+      'Hamilton St', 'Hamilton Street', 'Hamilton Rd', 'Hamilton Road',
+    ],
   },
   {
     name: 'Bay of Plenty',
@@ -79,6 +86,10 @@ const NZ_REGIONS = [
       'Kaiti', 'Tamarau', 'Mangapapa', 'Elgin', 'Riverdale',
       'Gisborne District', 'East Coast', 'East Cape',
     ],
+    // Gisborne St is a street name in some cities
+    excludes: [
+      'Gisborne St', 'Gisborne Street',
+    ],
   },
   {
     name: "Hawke's Bay",
@@ -90,6 +101,11 @@ const NZ_REGIONS = [
       'Pakipaki', 'Bridge Pa', 'Omahu', 'Tikokino', 'Porangahau',
       'Napier City', 'Hastings District', 'Central Hawke\'s Bay District',
       'Wairoa District',
+    ],
+    // Napier St/Rd and Hastings St/Rd are common street names elsewhere
+    excludes: [
+      'Napier St', 'Napier Street', 'Napier Rd', 'Napier Road',
+      'Hastings St', 'Hastings Street', 'Hastings Rd', 'Hastings Road',
     ],
   },
   {
@@ -104,6 +120,12 @@ const NZ_REGIONS = [
       'Moturoa', 'Marfell', 'Lynmouth', 'Strandon', 'Welbourn',
       'New Plymouth District', 'South Taranaki District', 'Stratford District',
       'Taranaki',
+    ],
+    // Taranaki St/Street is a major Wellington CBD street
+    // Stratford Rd is a street name in some cities
+    excludes: [
+      'Taranaki St', 'Taranaki Street', 'Taranaki Rd', 'Taranaki Road',
+      'Stratford Rd', 'Stratford Road',
     ],
   },
   {
@@ -138,6 +160,12 @@ const NZ_REGIONS = [
       'Upper Hutt City', 'Porirua City', 'Kapiti Coast District',
       'Masterton District', 'Carterton District', 'South Wairarapa District',
     ],
+    // Mount Wellington / Mt Wellington is an Auckland suburb
+    // Wellington St/Rd are street names in other cities
+    excludes: [
+      'Mount Wellington', 'Mt Wellington',
+      'Wellington St', 'Wellington Street', 'Wellington Rd', 'Wellington Road',
+    ],
   },
   {
     name: 'Tasman',
@@ -147,6 +175,10 @@ const NZ_REGIONS = [
       'Tapawera', 'Upper Moutere', 'Lower Moutere', 'Riwaka',
       'Golden Bay', 'Abel Tasman', 'St Arnaud', 'Pohara',
       'Tasman District',
+    ],
+    // Richmond Rd/St is a street name in Auckland and other cities
+    excludes: [
+      'Richmond Rd', 'Richmond Road', 'Richmond St', 'Richmond Street',
     ],
   },
   {
@@ -158,6 +190,11 @@ const NZ_REGIONS = [
       'Nayland', 'Saxton',
       'Nelson City',
     ],
+    // Nelson St/Street is a very common street name (Auckland CBD, Hamilton, etc.)
+    excludes: [
+      'Nelson St', 'Nelson Street', 'Nelson Rd', 'Nelson Road',
+      'Nelson Ave', 'Nelson Avenue', 'Nelson Cres', 'Nelson Crescent',
+    ],
   },
   {
     name: 'Marlborough',
@@ -166,6 +203,10 @@ const NZ_REGIONS = [
       'Renwick', 'Spring Creek', 'Wairau Valley', 'Rarangi',
       'Riverlands', 'Woodbourne', 'Grovetown',
       'Marlborough District',
+    ],
+    // Havelock North is in Hawke's Bay, not Marlborough's Havelock
+    excludes: [
+      'Havelock North',
     ],
   },
   {
@@ -209,6 +250,10 @@ const NZ_REGIONS = [
       'Dunedin City', 'Queenstown-Lakes District', 'Central Otago District',
       'Clutha District', 'Waitaki District',
     ],
+    // Palmerston North is in Manawatu, not Otago's Palmerston
+    excludes: [
+      'Palmerston North',
+    ],
   },
   {
     name: 'Southland',
@@ -219,6 +264,10 @@ const NZ_REGIONS = [
       'Wallacetown', 'Otatara', 'Kennington', 'Makarewa',
       'Tokanui', 'Dipton', 'Balfour', 'Mossburn',
       'Invercargill City', 'Southland District', 'Gore District',
+    ],
+    // Gore St is a street name in some cities
+    excludes: [
+      'Gore St', 'Gore Street',
     ],
   },
 ];

@@ -741,8 +741,13 @@
       const region = state.regions.find(r => r.name === regionName);
       if (region) {
         const content = (msg.content || '').toLowerCase();
-        const matchesRegion = region.terms.some(t => content.includes(t.toLowerCase()));
-        if (!matchesRegion) return false;
+        const matchesTerm = region.terms.some(t => content.includes(t.toLowerCase()));
+        if (!matchesTerm) return false;
+        // Check excludes - if content matches an exclude pattern, reject
+        if (region.excludes && region.excludes.length > 0) {
+          const matchesExclude = region.excludes.some(e => content.includes(e.toLowerCase()));
+          if (matchesExclude) return false;
+        }
       }
     }
     if (groupId) {

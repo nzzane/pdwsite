@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pdw-v16';
+const CACHE_NAME = 'pdw-v17';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/icons/icon-192.png',
