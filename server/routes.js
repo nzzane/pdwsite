@@ -5,7 +5,7 @@ const config = require('./config');
 const parser = require('./parser');
 const webpush = require('web-push');
 const { logError, logWarn } = require('./logger');
-const NZ_REGIONS = require('./regions');
+const { NZ_REGIONS, STREET_SUFFIXES, contentMatchesRegion } = require('./regions');
 
 const router = express.Router();
 
@@ -249,34 +249,38 @@ router.get('/api/messages', requireAuth, (req, res) => {
     conditions.push('m.received_at > ?');
     params.push(since);
   }
-  if (region) {
-    const regionData = NZ_REGIONS.find(r => r.name === region);
-    if (regionData && regionData.terms.length > 0) {
-      const termConditions = regionData.terms.map(() => 'm.content LIKE ?');
-      let regionSql = `(${termConditions.join(' OR ')})`;
-      for (const term of regionData.terms) {
-        params.push(`%${term}%`);
-      }
-      // Add exclude conditions to prevent false positives
-      if (regionData.excludes && regionData.excludes.length > 0) {
-        const excludeConditions = regionData.excludes.map(() => 'm.content NOT LIKE ?');
-        regionSql += ` AND ${excludeConditions.join(' AND ')}`;
-        for (const exc of regionData.excludes) {
-          params.push(`%${exc}%`);
-        }
-      }
-      conditions.push(regionSql);
+  const regionData = region ? NZ_REGIONS.find(r => r.name === region) : null;
+  if (regionData && regionData.terms.length > 0) {
+    // Broad SQL LIKE pre-filter (over-selects intentionally — JS post-filter refines)
+    const termConditions = regionData.terms.map(() => 'm.content LIKE ?');
+    const regionSql = `(${termConditions.join(' OR ')})`;
+    for (const term of regionData.terms) {
+      params.push(`%${term}%`);
     }
+    conditions.push(regionSql);
   }
 
   if (conditions.length > 0) {
     sql += ' WHERE ' + conditions.join(' AND ');
   }
 
-  sql += ' ORDER BY m.received_at DESC LIMIT ? OFFSET ?';
-  params.push(Math.min(parseInt(limit, 10) || 100, 500), parseInt(offset, 10) || 0);
+  const requestedLimit = Math.min(parseInt(limit, 10) || 100, 500);
+  const requestedOffset = parseInt(offset, 10) || 0;
 
-  const messages = db.prepare(sql).all(...params);
+  // When region filtering is active, over-fetch from SQL (broad LIKE pre-filter)
+  // then post-filter with precise JS matching (word boundaries + street suffix detection)
+  const sqlLimit = regionData ? requestedLimit * 3 : requestedLimit;
+
+  sql += ' ORDER BY m.received_at DESC LIMIT ? OFFSET ?';
+  params.push(sqlLimit, requestedOffset);
+
+  let messages = db.prepare(sql).all(...params);
+
+  // Post-query region filter: precise word-boundary + street-suffix matching
+  if (regionData) {
+    messages = messages.filter(msg => contentMatchesRegion(msg.content, regionData));
+    messages = messages.slice(0, requestedLimit);
+  }
 
   // Enrich with computed fields not stored in DB
   const aliasStmt = db.prepare('SELECT alias, colour, icon, notes FROM capcode_aliases WHERE capcode = ?');
@@ -345,7 +349,7 @@ router.get('/api/messages/call-types', requireAuth, (req, res) => {
 // ─── Regions ───
 
 router.get('/api/regions', requireAuth, (req, res) => {
-  res.json(NZ_REGIONS);
+  res.json({ regions: NZ_REGIONS, streetSuffixes: STREET_SUFFIXES });
 });
 
 // ─── Groups ───

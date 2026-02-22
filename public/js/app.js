@@ -33,6 +33,7 @@
     notifTab: 'settings', // 'settings', 'history', or 'display'
     pendingMessageId: null, // messageId to scroll to after load (from notification click)
     regions: [], // NZ regions with search terms for location filtering
+    streetSuffixes: [], // Street type suffixes for filtering out street names from region matches
   };
 
   // ─── Call type categories ───
@@ -717,6 +718,46 @@
     });
   }
 
+  // ─── Region matching helpers (word boundary + street suffix detection) ───
+  function escapeRegex(s) {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  function termMatchesAsLocation(termLower, contentLower, suffixAlt) {
+    const termPattern = escapeRegex(termLower).replace(/\s+/g, '\\s+');
+    // Must appear as a whole word (word boundaries)
+    const wordRegex = new RegExp('\\b' + termPattern + '\\b', 'i');
+    if (!wordRegex.test(contentLower)) return false;
+    // Must NOT be followed by a street suffix
+    if (suffixAlt) {
+      const streetRegex = new RegExp('\\b' + termPattern + '\\s+(?:' + suffixAlt + ')\\b', 'i');
+      if (streetRegex.test(contentLower)) return false;
+    }
+    return true;
+  }
+
+  let _suffixAlt = null;
+  function getSuffixAlt() {
+    if (_suffixAlt !== null) return _suffixAlt;
+    if (state.streetSuffixes && state.streetSuffixes.length > 0) {
+      _suffixAlt = state.streetSuffixes.map(s => escapeRegex(s)).join('|');
+    } else {
+      _suffixAlt = '';
+    }
+    return _suffixAlt;
+  }
+
+  function contentMatchesRegion(content, region) {
+    const contentLower = (content || '').toLowerCase();
+    if (region.excludes && region.excludes.length > 0) {
+      for (const exc of region.excludes) {
+        if (contentLower.includes(exc.toLowerCase())) return false;
+      }
+    }
+    const suffixAlt = getSuffixAlt();
+    return region.terms.some(term => termMatchesAsLocation(term.toLowerCase(), contentLower, suffixAlt));
+  }
+
   function matchesFilters(msg) {
     const search = $('#filter-search').value.toLowerCase();
     const callType = $('#filter-call-type').value;
@@ -739,16 +780,7 @@
     if (trucks && !(msg.trucks || '').toLowerCase().includes(trucks)) return false;
     if (regionName) {
       const region = state.regions.find(r => r.name === regionName);
-      if (region) {
-        const content = (msg.content || '').toLowerCase();
-        const matchesTerm = region.terms.some(t => content.includes(t.toLowerCase()));
-        if (!matchesTerm) return false;
-        // Check excludes - if content matches an exclude pattern, reject
-        if (region.excludes && region.excludes.length > 0) {
-          const matchesExclude = region.excludes.some(e => content.includes(e.toLowerCase()));
-          if (matchesExclude) return false;
-        }
-      }
+      if (region && !contentMatchesRegion(msg.content, region)) return false;
     }
     if (groupId) {
       const group = state.groups.find(g => g.id === parseInt(groupId, 10));
@@ -773,7 +805,7 @@
   // ─── Load data ───
   async function loadInitialData() {
     try {
-      const [groups, favs, aliases, callTypes, filters, keywordAlerts, alarmLevelData, prefs, silenced, regions] = await Promise.all([
+      const [groups, favs, aliases, callTypes, filters, keywordAlerts, alarmLevelData, prefs, silenced, regionData] = await Promise.all([
         api('/api/groups'),
         api('/api/favourites'),
         api('/api/aliases'),
@@ -789,7 +821,9 @@
       state.groups = groups;
       state.favourites = favs;
       state.callTypes = callTypes;
-      state.regions = regions;
+      state.regions = regionData.regions || regionData;
+      state.streetSuffixes = regionData.streetSuffixes || [];
+      _suffixAlt = null; // reset cached suffix regex
       state.filters = filters;
       state.keywordAlerts = keywordAlerts;
       state.alarmLevelSetting = alarmLevelData.min_alarm_level || null;

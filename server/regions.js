@@ -1,6 +1,58 @@
 // New Zealand regions with search terms (towns, suburbs, districts) for location filtering.
-// Terms are matched case-insensitively against message content.
-// Excludes prevent false positives from suburb/street names that contain another region's name.
+// Terms are matched case-insensitively against message content using word boundaries.
+// Excludes prevent false positives from compound place names (e.g., Mount Wellington).
+// Street suffix detection automatically prevents matching terms used as street names
+// (e.g., "Tawa St", "Featherston St", "Heretaunga St" won't match as locations).
+
+// Common NZ street/road type suffixes — if a term is immediately followed by one of
+// these, it's a street name rather than a location/suburb reference.
+const STREET_SUFFIXES = [
+  'st', 'street', 'rd', 'road', 'ave', 'avenue', 'dr', 'drive',
+  'pl', 'place', 'cres', 'crescent', 'cr', 'tce', 'terrace',
+  'way', 'lane', 'ln', 'blvd', 'hwy', 'highway', 'court', 'crt', 'ct',
+  'cl', 'close', 'gr', 'grove', 'pde', 'parade', 'sq', 'square',
+  'quay', 'esplanade', 'esp', 'mews', 'row', 'walk', 'rise', 'loop',
+  'path', 'track', 'line',
+];
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const SUFFIX_ALT = STREET_SUFFIXES.map(s => escapeRegex(s)).join('|');
+
+/**
+ * Check if a search term matches as a location (not a street name) in content.
+ * Uses word boundaries to prevent substring matches (e.g., "Tawa" won't match "Kaitawa").
+ * Rejects matches where the term is followed by a street suffix (e.g., "Tawa St").
+ */
+function termMatchesAsLocation(termLower, contentLower) {
+  const termPattern = escapeRegex(termLower).replace(/\s+/g, '\\s+');
+  // Must appear as a whole word (word boundaries)
+  const wordRegex = new RegExp('\\b' + termPattern + '\\b', 'i');
+  if (!wordRegex.test(contentLower)) return false;
+  // Must NOT be followed by a street suffix
+  const streetRegex = new RegExp('\\b' + termPattern + '\\s+(?:' + SUFFIX_ALT + ')\\b', 'i');
+  if (streetRegex.test(contentLower)) return false;
+  return true;
+}
+
+/**
+ * Check if message content matches a region.
+ * First checks excludes (compound word false positives like "Mount Wellington"),
+ * then checks if any term matches as a location using word boundaries + street suffix detection.
+ */
+function contentMatchesRegion(content, region) {
+  const contentLower = (content || '').toLowerCase();
+  // Check excludes first (compound word cases like "Mount Wellington", "Palmerston North")
+  if (region.excludes && region.excludes.length > 0) {
+    for (const exc of region.excludes) {
+      if (contentLower.includes(exc.toLowerCase())) return false;
+    }
+  }
+  // Check if any term matches as a location (not a street name)
+  return region.terms.some(term => termMatchesAsLocation(term.toLowerCase(), contentLower));
+}
 
 const NZ_REGIONS = [
   {
@@ -55,12 +107,9 @@ const NZ_REGIONS = [
       'Thames-Coromandel District', 'Otorohanga District', 'Waitomo District',
       'Taupo District',
     ],
-    // Cambridge Tce/Terrace is a Wellington CBD street, not Waikato
-    // Hamilton Rd/St are street names in other cities
-    excludes: [
-      'Cambridge Tce', 'Cambridge Terrace',
-      'Hamilton St', 'Hamilton Street', 'Hamilton Rd', 'Hamilton Road',
-    ],
+    // Cambridge Tce/Terrace is handled by street suffix detection automatically
+    // But keep compound excludes that street suffix detection can't handle
+    excludes: [],
   },
   {
     name: 'Bay of Plenty',
@@ -86,10 +135,8 @@ const NZ_REGIONS = [
       'Kaiti', 'Tamarau', 'Mangapapa', 'Elgin', 'Riverdale',
       'Gisborne District', 'East Coast', 'East Cape',
     ],
-    // Gisborne St is a street name in some cities
-    excludes: [
-      'Gisborne St', 'Gisborne Street',
-    ],
+    // Street suffix detection handles "Gisborne St" etc. automatically
+    excludes: [],
   },
   {
     name: "Hawke's Bay",
@@ -102,11 +149,8 @@ const NZ_REGIONS = [
       'Napier City', 'Hastings District', 'Central Hawke\'s Bay District',
       'Wairoa District',
     ],
-    // Napier St/Rd and Hastings St/Rd are common street names elsewhere
-    excludes: [
-      'Napier St', 'Napier Street', 'Napier Rd', 'Napier Road',
-      'Hastings St', 'Hastings Street', 'Hastings Rd', 'Hastings Road',
-    ],
+    // Street suffix detection handles "Napier St", "Hastings Rd" etc. automatically
+    excludes: [],
   },
   {
     name: 'Taranaki',
@@ -121,12 +165,8 @@ const NZ_REGIONS = [
       'New Plymouth District', 'South Taranaki District', 'Stratford District',
       'Taranaki',
     ],
-    // Taranaki St/Street is a major Wellington CBD street
-    // Stratford Rd is a street name in some cities
-    excludes: [
-      'Taranaki St', 'Taranaki Street', 'Taranaki Rd', 'Taranaki Road',
-      'Stratford Rd', 'Stratford Road',
-    ],
+    // Street suffix detection handles "Taranaki St", "Stratford Rd" etc. automatically
+    excludes: [],
   },
   {
     name: 'Manawatu-Whanganui',
@@ -160,11 +200,10 @@ const NZ_REGIONS = [
       'Upper Hutt City', 'Porirua City', 'Kapiti Coast District',
       'Masterton District', 'Carterton District', 'South Wairarapa District',
     ],
-    // Mount Wellington / Mt Wellington is an Auckland suburb
-    // Wellington St/Rd are street names in other cities
+    // Mount Wellington / Mt Wellington is Auckland suburb (compound word, not caught by suffix detection)
+    // Street suffix detection handles "Wellington St", "Tawa St", "Featherston St", "Heretaunga St" etc.
     excludes: [
       'Mount Wellington', 'Mt Wellington',
-      'Wellington St', 'Wellington Street', 'Wellington Rd', 'Wellington Road',
     ],
   },
   {
@@ -176,10 +215,8 @@ const NZ_REGIONS = [
       'Golden Bay', 'Abel Tasman', 'St Arnaud', 'Pohara',
       'Tasman District',
     ],
-    // Richmond Rd/St is a street name in Auckland and other cities
-    excludes: [
-      'Richmond Rd', 'Richmond Road', 'Richmond St', 'Richmond Street',
-    ],
+    // Street suffix detection handles "Richmond Rd" etc. automatically
+    excludes: [],
   },
   {
     name: 'Nelson',
@@ -190,11 +227,8 @@ const NZ_REGIONS = [
       'Nayland', 'Saxton',
       'Nelson City',
     ],
-    // Nelson St/Street is a very common street name (Auckland CBD, Hamilton, etc.)
-    excludes: [
-      'Nelson St', 'Nelson Street', 'Nelson Rd', 'Nelson Road',
-      'Nelson Ave', 'Nelson Avenue', 'Nelson Cres', 'Nelson Crescent',
-    ],
+    // Street suffix detection handles "Nelson St", "Nelson Rd" etc. automatically
+    excludes: [],
   },
   {
     name: 'Marlborough',
@@ -204,7 +238,7 @@ const NZ_REGIONS = [
       'Riverlands', 'Woodbourne', 'Grovetown',
       'Marlborough District',
     ],
-    // Havelock North is in Hawke's Bay, not Marlborough's Havelock
+    // Havelock North is in Hawke's Bay (compound word, not caught by suffix detection)
     excludes: [
       'Havelock North',
     ],
@@ -250,7 +284,7 @@ const NZ_REGIONS = [
       'Dunedin City', 'Queenstown-Lakes District', 'Central Otago District',
       'Clutha District', 'Waitaki District',
     ],
-    // Palmerston North is in Manawatu, not Otago's Palmerston
+    // Palmerston North is in Manawatu (compound word, not caught by suffix detection)
     excludes: [
       'Palmerston North',
     ],
@@ -265,11 +299,9 @@ const NZ_REGIONS = [
       'Tokanui', 'Dipton', 'Balfour', 'Mossburn',
       'Invercargill City', 'Southland District', 'Gore District',
     ],
-    // Gore St is a street name in some cities
-    excludes: [
-      'Gore St', 'Gore Street',
-    ],
+    // Street suffix detection handles "Gore St" etc. automatically
+    excludes: [],
   },
 ];
 
-module.exports = NZ_REGIONS;
+module.exports = { NZ_REGIONS, STREET_SUFFIXES, contentMatchesRegion };
