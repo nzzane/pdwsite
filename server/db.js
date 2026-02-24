@@ -11,9 +11,20 @@ if (!fs.existsSync(dataDir)) {
 
 const db = new Database(config.DB_PATH);
 
-// Enable WAL mode for better concurrent read performance
+// ─── Performance & reliability pragmas ───
+// WAL mode: allows concurrent readers while writing (critical for multi-user)
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
+// Wait up to 5 seconds if DB is locked by another operation (prevents SQLITE_BUSY errors)
+db.pragma('busy_timeout = 5000');
+// NORMAL sync is safe with WAL and significantly faster than FULL
+db.pragma('synchronous = NORMAL');
+// 64MB page cache for faster reads on large datasets
+db.pragma('cache_size = -64000');
+// Keep temp tables in memory for faster sorting/grouping
+db.pragma('temp_store = MEMORY');
+// Memory-map first 256MB of the DB file for faster sequential reads
+db.pragma('mmap_size = 268435456');
 
 // Create tables
 db.exec(`

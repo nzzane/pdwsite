@@ -26,6 +26,9 @@
     keywordAlerts: [],
     searchPage: 0,
     searchLimit: 50,
+    livePage: 0,
+    liveLimit: 100,
+    liveTotalCount: 0,
     alarmLevelSetting: null, // null = off, 2-5 = minimum alarm level
     alarmLevelGroups: [], // group IDs for alarm level scoping (empty = all/nationwide)
     preferences: { default_view: 'live', default_group_id: null, default_keyword: null, default_region: null },
@@ -644,13 +647,19 @@
     // Check if message passes current filters
     if (!matchesFilters(msg)) return;
 
+    // Only add WS messages to the live feed when viewing page 1
+    if (state.livePage !== 0) return;
+
     // Add to front of array (newest first)
     state.messages.unshift(msg);
-    if (state.messages.length > state.maxLiveMessages) {
+    if (state.messages.length > state.liveLimit) {
       state.messages.pop();
       const list = $('#message-list');
       if (list.lastChild) list.removeChild(list.lastChild);
     }
+    // Bump the total count so pagination stays accurate
+    state.liveTotalCount++;
+    renderLivePagination();
 
     // Prepend to top of list (newest at top)
     const list = $('#message-list');
@@ -859,36 +868,8 @@
   }
 
   async function loadRecentMessages() {
-    try {
-      const params = new URLSearchParams({ limit: '100' });
-      if ($('#filter-hide-test') && $('#filter-hide-test').checked) {
-        params.set('exclude_call_type', 'TEST,MISC');
-      }
-      const msgs = await api('/api/messages?' + params.toString());
-      const list = $('#message-list');
-      list.innerHTML = '';
-      // API returns newest first - that's our display order
-      state.messages = msgs;
-      for (const msg of state.messages) {
-        list.appendChild(renderMessageCard(msg));
-      }
-
-      // If we have a pending messageId from notification click, scroll to it
-      if (state.pendingMessageId) {
-        const msgId = state.pendingMessageId;
-        state.pendingMessageId = null;
-        requestAnimationFrame(() => {
-          const card = document.querySelector(`.msg-card[data-id="${msgId}"]`);
-          if (card) {
-            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            card.classList.add('highlight-flash');
-            setTimeout(() => card.classList.remove('highlight-flash'), 3000);
-          }
-        });
-      }
-    } catch (err) {
-      toast('Failed to load messages', 'error');
-    }
+    state.livePage = 0;
+    await loadLivePage(0);
   }
 
   // ─── Sidebar rendering ───
@@ -1042,55 +1023,9 @@
   }
 
   // ─── Apply filters (re-fetch for search, re-filter for live) ───
-  async function applyFilters() {
-    if (state.currentView === 'search') {
-      await doSearch(0);
-    }
-    // For live view, new messages are filtered in handleNewMessage
-    // but we also re-fetch existing messages with the current filters
-    if (state.currentView === 'live') {
-      try {
-        const params = new URLSearchParams();
-        params.set('limit', '100');
-        const search = $('#filter-search').value;
-        const callType = $('#filter-call-type').value;
-        const protocol = $('#filter-protocol').value;
-        const capcode = $('#filter-capcode').value;
-        const location = $('#filter-location').value;
-        const trucks = $('#filter-trucks').value;
-        const groupId = $('#filter-group').value;
-        const regionName = $('#filter-region') ? $('#filter-region').value : '';
-        const hideTest = $('#filter-hide-test') && $('#filter-hide-test').checked;
-        if (search) params.set('search', search);
-        if (callType) params.set('call_type', callType);
-        if (protocol) params.set('protocol', protocol);
-        if (capcode) params.set('capcode', capcode);
-        if (location) params.set('location', location);
-        if (trucks) params.set('trucks', trucks);
-        if (groupId) params.set('group_id', groupId);
-        if (regionName) params.set('region', regionName);
-        if (hideTest) params.set('exclude_call_type', 'TEST,MISC');
-
-        const msgs = await api('/api/messages?' + params.toString());
-        const list = $('#message-list');
-        list.innerHTML = '';
-        // Newest first (API returns newest first)
-        state.messages = msgs;
-        for (const msg of state.messages) {
-          list.appendChild(renderMessageCard(msg));
-        }
-      } catch (err) {
-        toast('Filter error: ' + err.message, 'error');
-      }
-    }
-  }
-
-  // ─── Search ───
-  async function doSearch(page) {
-    state.searchPage = page;
+  // ─── Shared filter params builder ───
+  function buildFilterParams() {
     const params = new URLSearchParams();
-    params.set('limit', state.searchLimit.toString());
-    params.set('offset', (page * state.searchLimit).toString());
     const search = $('#filter-search').value;
     const callType = $('#filter-call-type').value;
     const protocol = $('#filter-protocol').value;
@@ -1099,6 +1034,7 @@
     const trucks = $('#filter-trucks').value;
     const groupId = $('#filter-group').value;
     const regionName = $('#filter-region') ? $('#filter-region').value : '';
+    const hideTest = $('#filter-hide-test') && $('#filter-hide-test').checked;
     if (search) params.set('search', search);
     if (callType) params.set('call_type', callType);
     if (protocol) params.set('protocol', protocol);
@@ -1107,31 +1043,167 @@
     if (trucks) params.set('trucks', trucks);
     if (groupId) params.set('group_id', groupId);
     if (regionName) params.set('region', regionName);
+    if (hideTest) params.set('exclude_call_type', 'TEST,MISC');
+    return params;
+  }
 
+  async function applyFilters() {
+    if (state.currentView === 'search') {
+      await doSearch(0);
+    }
+    if (state.currentView === 'live') {
+      state.livePage = 0;
+      await loadLivePage(0);
+    }
+  }
+
+  // ─── Live feed pagination (24-hour window) ───
+  async function loadLivePage(page) {
+    state.livePage = page;
     try {
-      const msgs = await api('/api/messages?' + params.toString());
+      const params = buildFilterParams();
+      params.set('limit', state.liveLimit.toString());
+      params.set('offset', (page * state.liveLimit).toString());
+      // Live feed: 24-hour window
+      const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString().replace('T', ' ').slice(0, 19);
+      params.set('since', since);
+
+      // Fetch messages and count in parallel
+      const [msgs, countData] = await Promise.all([
+        api('/api/messages?' + params.toString()),
+        api('/api/messages/count?' + params.toString()),
+      ]);
+
+      state.liveTotalCount = countData.total || 0;
+
+      const list = $('#message-list');
+      list.innerHTML = '';
+      state.messages = msgs;
+      for (const msg of state.messages) {
+        list.appendChild(renderMessageCard(msg));
+      }
+
+      renderLivePagination();
+
+      // If we have a pending messageId from notification click, scroll to it
+      if (state.pendingMessageId) {
+        const msgId = state.pendingMessageId;
+        state.pendingMessageId = null;
+        requestAnimationFrame(() => {
+          const card = document.querySelector(`.msg-card[data-id="${msgId}"]`);
+          if (card) {
+            card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            card.classList.add('highlight-flash');
+            setTimeout(() => card.classList.remove('highlight-flash'), 3000);
+          }
+        });
+      }
+    } catch (err) {
+      toast('Failed to load messages: ' + err.message, 'error');
+    }
+  }
+
+  function renderLivePagination() {
+    const el = $('#live-pagination');
+    if (!el) return;
+    const totalPages = Math.max(1, Math.ceil(state.liveTotalCount / state.liveLimit));
+    if (totalPages <= 1) { el.innerHTML = ''; return; }
+    renderPageControls(el, state.livePage, totalPages, (p) => loadLivePage(p));
+  }
+
+  // ─── Search (unlimited history) ───
+  async function doSearch(page) {
+    state.searchPage = page;
+    try {
+      const params = buildFilterParams();
+      params.set('limit', state.searchLimit.toString());
+      params.set('offset', (page * state.searchLimit).toString());
+      // No 'since' param — search goes back to the beginning of time
+
+      const [msgs, countData] = await Promise.all([
+        api('/api/messages?' + params.toString()),
+        api('/api/messages/count?' + params.toString()),
+      ]);
+
       const list = $('#search-results');
       list.innerHTML = '';
       for (const msg of msgs) {
         list.appendChild(renderMessageCard(msg));
       }
-      renderPagination(msgs.length);
+
+      const totalPages = Math.max(1, Math.ceil((countData.total || 0) / state.searchLimit));
+      renderPageControls($('#search-pagination'), state.searchPage, totalPages, (p) => doSearch(p));
     } catch (err) {
       toast('Search failed: ' + err.message, 'error');
     }
   }
 
-  function renderPagination(resultCount) {
-    const el = $('#search-pagination');
-    const hasPrev = state.searchPage > 0;
-    const hasNext = resultCount >= state.searchLimit;
-    el.innerHTML = `
-      <button ${hasPrev ? '' : 'disabled'} id="page-prev">Previous</button>
-      <span style="font-size:0.85rem;color:var(--text-dim)">Page ${state.searchPage + 1}</span>
-      <button ${hasNext ? '' : 'disabled'} id="page-next">Next</button>
-    `;
-    if (hasPrev) el.querySelector('#page-prev').onclick = () => doSearch(state.searchPage - 1);
-    if (hasNext) el.querySelector('#page-next').onclick = () => doSearch(state.searchPage + 1);
+  // ─── Shared page controls renderer ───
+  function renderPageControls(el, currentPage, totalPages, onPageChange) {
+    if (!el) return;
+    el.innerHTML = '';
+
+    // Previous button
+    const prevBtn = document.createElement('button');
+    prevBtn.textContent = '\u25C0 Prev';
+    prevBtn.disabled = currentPage === 0;
+    if (!prevBtn.disabled) prevBtn.onclick = () => onPageChange(currentPage - 1);
+    el.appendChild(prevBtn);
+
+    // Page number buttons (show up to 7 pages with ellipsis)
+    const maxVisible = 7;
+    let startPage = Math.max(0, currentPage - Math.floor(maxVisible / 2));
+    let endPage = Math.min(totalPages - 1, startPage + maxVisible - 1);
+    if (endPage - startPage < maxVisible - 1) {
+      startPage = Math.max(0, endPage - maxVisible + 1);
+    }
+
+    if (startPage > 0) {
+      const btn = document.createElement('button');
+      btn.textContent = '1';
+      btn.onclick = () => onPageChange(0);
+      el.appendChild(btn);
+      if (startPage > 1) {
+        const dots = document.createElement('span');
+        dots.textContent = '\u2026';
+        dots.style.cssText = 'font-size:0.85rem;color:var(--text-dim);padding:0 0.25rem';
+        el.appendChild(dots);
+      }
+    }
+
+    for (let i = startPage; i <= endPage; i++) {
+      const btn = document.createElement('button');
+      btn.textContent = (i + 1).toString();
+      if (i === currentPage) btn.classList.add('active');
+      else btn.onclick = () => onPageChange(i);
+      el.appendChild(btn);
+    }
+
+    if (endPage < totalPages - 1) {
+      if (endPage < totalPages - 2) {
+        const dots = document.createElement('span');
+        dots.textContent = '\u2026';
+        dots.style.cssText = 'font-size:0.85rem;color:var(--text-dim);padding:0 0.25rem';
+        el.appendChild(dots);
+      }
+      const btn = document.createElement('button');
+      btn.textContent = totalPages.toString();
+      btn.onclick = () => onPageChange(totalPages - 1);
+      el.appendChild(btn);
+    }
+
+    // Next button
+    const nextBtn = document.createElement('button');
+    nextBtn.textContent = 'Next \u25B6';
+    nextBtn.disabled = currentPage >= totalPages - 1;
+    if (!nextBtn.disabled) nextBtn.onclick = () => onPageChange(currentPage + 1);
+    el.appendChild(nextBtn);
+
+    // Page info
+    const info = document.createElement('span');
+    info.style.cssText = 'font-size:0.75rem;color:var(--text-dim);margin-left:0.5rem';
+    info.textContent = `Page ${currentPage + 1} of ${totalPages}`;
+    el.appendChild(info);
   }
 
   // ─── Stats ───
@@ -2397,10 +2469,11 @@
     }
 
     // Auto-refresh live messages every 30s (catches missed WS messages)
+    // Reloads the current page rather than resetting to page 1
     if (state.autoRefreshInterval) clearInterval(state.autoRefreshInterval);
     state.autoRefreshInterval = setInterval(() => {
       if (state.currentView === 'live' && !state.paused && !document.hidden) {
-        applyFilters(); // Uses current filter state including group/search/type filters
+        loadLivePage(state.livePage);
       }
     }, 30000);
 
@@ -2628,7 +2701,6 @@
         switchView('live');
       }
       applyFilters();
-      loadRecentMessages();
     });
     $('#btn-save-filter').addEventListener('click', showSaveFilterModal);
 

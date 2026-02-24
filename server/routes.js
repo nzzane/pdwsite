@@ -179,31 +179,21 @@ router.delete('/api/admin/error-log', requireAuth, requireAdmin, (req, res) => {
 
 // ─── Messages ───
 
-router.get('/api/messages', requireAuth, (req, res) => {
+// Helper: build WHERE conditions + params from query filters (shared by messages + count endpoints)
+function buildMessageQuery(query) {
   const {
-    limit = 100,
-    offset = 0,
-    capcode,
-    call_type,
-    exclude_call_type,
-    location,
-    trucks,
-    group_id,
-    search,
-    since,
-    protocol,
-    region,
-  } = req.query;
+    capcode, call_type, exclude_call_type, location, trucks,
+    group_id, search, since, protocol, region,
+  } = query;
 
-  let sql = 'SELECT DISTINCT m.* FROM messages m';
+  let from = 'SELECT DISTINCT m.* FROM messages m';
   const params = [];
   const conditions = [];
 
   if (group_id) {
     const gid = parseInt(group_id, 10);
-    // Match by capcode membership OR keyword match
-    sql += ` LEFT JOIN group_members gm ON LTRIM(m.capcode, '0') = LTRIM(gm.capcode, '0') AND gm.group_id = ?`;
-    sql += ` LEFT JOIN group_keywords gk ON gk.group_id = ? AND m.content LIKE '%' || gk.keyword || '%'`;
+    from += ` LEFT JOIN group_members gm ON LTRIM(m.capcode, '0') = LTRIM(gm.capcode, '0') AND gm.group_id = ?`;
+    from += ` LEFT JOIN group_keywords gk ON gk.group_id = ? AND m.content LIKE '%' || gk.keyword || '%'`;
     conditions.push('(gm.id IS NOT NULL OR gk.id IS NOT NULL)');
     params.push(gid, gid);
   }
@@ -211,14 +201,8 @@ router.get('/api/messages', requireAuth, (req, res) => {
   // Exclude hidden capcodes by default
   conditions.push("NOT EXISTS (SELECT 1 FROM capcode_aliases ca WHERE ca.capcode = CASE WHEN LENGTH(LTRIM(m.capcode, '0')) = 0 THEN '0' ELSE LTRIM(m.capcode, '0') END AND ca.hidden = 1)");
 
-  if (capcode) {
-    conditions.push('m.capcode = ?');
-    params.push(capcode);
-  }
-  if (call_type) {
-    conditions.push('m.call_type = ?');
-    params.push(call_type);
-  }
+  if (capcode) { conditions.push('m.capcode = ?'); params.push(capcode); }
+  if (call_type) { conditions.push('m.call_type = ?'); params.push(call_type); }
   if (exclude_call_type) {
     const excludeTypes = exclude_call_type.split(',').map(t => t.trim()).filter(Boolean);
     if (excludeTypes.length === 1) {
@@ -229,60 +213,27 @@ router.get('/api/messages', requireAuth, (req, res) => {
       params.push(...excludeTypes);
     }
   }
-  if (location) {
-    conditions.push('m.location LIKE ?');
-    params.push(`%${location}%`);
-  }
-  if (trucks) {
-    conditions.push('m.trucks LIKE ?');
-    params.push(`%${trucks}%`);
-  }
-  if (search) {
-    conditions.push('m.content LIKE ?');
-    params.push(`%${search}%`);
-  }
-  if (protocol) {
-    conditions.push('m.protocol = ?');
-    params.push(protocol);
-  }
-  if (since) {
-    conditions.push('m.received_at > ?');
-    params.push(since);
-  }
+  if (location) { conditions.push('m.location LIKE ?'); params.push(`%${location}%`); }
+  if (trucks) { conditions.push('m.trucks LIKE ?'); params.push(`%${trucks}%`); }
+  if (search) { conditions.push('m.content LIKE ?'); params.push(`%${search}%`); }
+  if (protocol) { conditions.push('m.protocol = ?'); params.push(protocol); }
+  if (since) { conditions.push('m.received_at > ?'); params.push(since); }
+
   const regionData = region ? NZ_REGIONS.find(r => r.name === region) : null;
   if (regionData && regionData.terms.length > 0) {
-    // Broad SQL LIKE pre-filter (over-selects intentionally — JS post-filter refines)
     const termConditions = regionData.terms.map(() => 'm.content LIKE ?');
-    const regionSql = `(${termConditions.join(' OR ')})`;
-    for (const term of regionData.terms) {
-      params.push(`%${term}%`);
-    }
-    conditions.push(regionSql);
+    conditions.push(`(${termConditions.join(' OR ')})`);
+    for (const term of regionData.terms) params.push(`%${term}%`);
   }
 
-  if (conditions.length > 0) {
-    sql += ' WHERE ' + conditions.join(' AND ');
-  }
+  let where = '';
+  if (conditions.length > 0) where = ' WHERE ' + conditions.join(' AND ');
 
-  const requestedLimit = Math.min(parseInt(limit, 10) || 100, 500);
-  const requestedOffset = parseInt(offset, 10) || 0;
+  return { from, where, params, regionData };
+}
 
-  // When region filtering is active, over-fetch from SQL (broad LIKE pre-filter)
-  // then post-filter with precise JS matching (word boundaries + street suffix detection)
-  const sqlLimit = regionData ? requestedLimit * 3 : requestedLimit;
-
-  sql += ' ORDER BY m.received_at DESC LIMIT ? OFFSET ?';
-  params.push(sqlLimit, requestedOffset);
-
-  let messages = db.prepare(sql).all(...params);
-
-  // Post-query region filter: precise word-boundary + street-suffix matching
-  if (regionData) {
-    messages = messages.filter(msg => contentMatchesRegion(msg.content, regionData));
-    messages = messages.slice(0, requestedLimit);
-  }
-
-  // Enrich with computed fields not stored in DB
+// Helper: enrich messages with computed fields
+function enrichMessages(messages) {
   const aliasStmt = db.prepare('SELECT alias, colour, icon, notes FROM capcode_aliases WHERE capcode = ?');
   for (const msg of messages) {
     const priority = parser.extractPriority(msg.content);
@@ -298,8 +249,47 @@ router.get('/api/messages', requireAuth, (req, res) => {
     const alarmLvl = parser.extractAlarmLevel(msg.content);
     if (alarmLvl) msg.alarm_level = alarmLvl;
   }
+  return messages;
+}
 
-  res.json(messages);
+router.get('/api/messages', requireAuth, (req, res) => {
+  try {
+    const { limit = 100, offset = 0 } = req.query;
+    const { from, where, params, regionData } = buildMessageQuery(req.query);
+
+    const requestedLimit = Math.min(parseInt(limit, 10) || 100, 500);
+    const requestedOffset = parseInt(offset, 10) || 0;
+
+    // Over-fetch when region filtering is active (broad SQL LIKE → precise JS post-filter)
+    const sqlLimit = regionData ? requestedLimit * 3 : requestedLimit;
+
+    const sql = from + where + ' ORDER BY m.received_at DESC LIMIT ? OFFSET ?';
+    let messages = db.prepare(sql).all(...params, sqlLimit, requestedOffset);
+
+    // Post-query region filter: precise word-boundary + street-suffix matching
+    if (regionData) {
+      messages = messages.filter(msg => contentMatchesRegion(msg.content, regionData));
+      messages = messages.slice(0, requestedLimit);
+    }
+
+    res.json(enrichMessages(messages));
+  } catch (err) {
+    logError('GET /api/messages failed', err);
+    res.status(500).json({ error: 'Failed to load messages' });
+  }
+});
+
+// Count endpoint for pagination (returns total matching messages so UI can show page numbers)
+router.get('/api/messages/count', requireAuth, (req, res) => {
+  try {
+    const { from, where, params } = buildMessageQuery(req.query);
+    const countSql = from.replace('SELECT DISTINCT m.*', 'SELECT COUNT(DISTINCT m.id) as total') + where;
+    const row = db.prepare(countSql).get(...params);
+    res.json({ total: row ? row.total : 0 });
+  } catch (err) {
+    logError('GET /api/messages/count failed', err);
+    res.status(500).json({ error: 'Failed to count messages' });
+  }
 });
 
 router.get('/api/messages/stats', requireAuth, (req, res) => {
