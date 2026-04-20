@@ -2953,6 +2953,11 @@
     playBtn.setAttribute('aria-label', isPlaying ? 'Stop stream' : 'Play stream');
   }
 
+  function audioStreamUrl() {
+    // <audio> elements can't send Authorization headers; pass token as query param instead
+    return `/api/audio/stream?token=${encodeURIComponent(state.token || '')}`;
+  }
+
   function toggleAudioPlay() {
     if (!audioState.el) return;
     if (audioState.playing) {
@@ -2960,7 +2965,7 @@
       audioState.el.src = '';
     } else {
       // Always re-open stream to get live audio (not buffered data)
-      audioState.el.src = '/api/audio/stream';
+      audioState.el.src = audioStreamUrl();
       audioState.el.load();
       audioState.el.play().catch(() => {
         updateAudioDot('error');
@@ -3072,7 +3077,7 @@
           audioState.el.src = '';
           setTimeout(() => {
             if (audioState.el) {
-              audioState.el.src = '/api/audio/stream';
+              audioState.el.src = audioStreamUrl();
               audioState.el.load();
               audioState.el.play().catch(() => {});
             }

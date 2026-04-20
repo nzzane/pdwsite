@@ -4,16 +4,20 @@ const config = require('./config');
 const db = require('./db');
 
 /**
- * Express middleware: requires a valid JWT in Authorization header.
+ * Express middleware: requires a valid JWT in Authorization header OR ?token= query param.
+ * Query param is needed for browser media elements (<audio>) which can't set headers.
  * Populates req.user with { id, username, role }.
  */
 function requireAuth(req, res, next) {
   const header = req.headers.authorization;
-  if (!header || !header.startsWith('Bearer ')) {
+  const raw = (header && header.startsWith('Bearer '))
+    ? header.slice(7)
+    : req.query.token;
+  if (!raw) {
     return res.status(401).json({ error: 'Authentication required' });
   }
   try {
-    const payload = jwt.verify(header.slice(7), config.JWT_SECRET);
+    const payload = jwt.verify(raw, config.JWT_SECRET);
     req.user = payload;
     next();
   } catch {
