@@ -2850,7 +2850,10 @@
     freq: '',
     mode: '',
     statusPollTimer: null,
-    el: null, // the <audio> element
+    el: null,       // the <audio> element
+    audioCtx: null, // Web Audio API context
+    analyser: null, // AnalyserNode for level metering
+    levelRaf: null, // requestAnimationFrame handle
   };
 
   async function initAudioPlayer() {
@@ -2883,21 +2886,26 @@
           audioState.playing = true;
           updateAudioDot('playing');
           setPlayBtnState(true);
+          setupAudioAnalyser();
+          startLevelMeter();
         });
         audioState.el.addEventListener('pause',  () => {
           audioState.playing = false;
           updateAudioDot('ready');
           setPlayBtnState(false);
+          stopLevelMeter();
         });
         audioState.el.addEventListener('error',  () => {
           audioState.playing = false;
           updateAudioDot('error');
           setPlayBtnState(false);
+          stopLevelMeter();
         });
         audioState.el.addEventListener('ended', () => {
           audioState.playing = false;
           updateAudioDot('ready');
           setPlayBtnState(false);
+          stopLevelMeter();
         });
       }
       $('#audio-volume').value = audioState.volume;
@@ -2986,6 +2994,73 @@
       btn.title = muted ? 'Unmute' : 'Mute';
       btn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
     }
+  }
+
+  // ─── Web Audio level metering ───
+
+  function setupAudioAnalyser() {
+    if (audioState.analyser || !audioState.el) return;
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      const ctx = new Ctx();
+      const source = ctx.createMediaElementSource(audioState.el);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.75;
+      source.connect(analyser);
+      analyser.connect(ctx.destination);
+      audioState.audioCtx = ctx;
+      audioState.analyser = analyser;
+      // Resume in case browser suspended it before user interaction
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+    } catch { /* AudioContext unavailable */ }
+  }
+
+  function getRmsLevel() {
+    if (!audioState.analyser) return 0;
+    const buf = new Uint8Array(audioState.analyser.frequencyBinCount);
+    audioState.analyser.getByteTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) {
+      const s = (buf[i] - 128) / 128;
+      sum += s * s;
+    }
+    return Math.sqrt(sum / buf.length);
+  }
+
+  function startLevelMeter() {
+    if (audioState.levelRaf) cancelAnimationFrame(audioState.levelRaf);
+    // Resume AudioContext if suspended (required after background tab)
+    if (audioState.audioCtx && audioState.audioCtx.state === 'suspended') {
+      audioState.audioCtx.resume().catch(() => {});
+    }
+    function tick() {
+      if (!audioState.playing) return;
+      const rms = getRmsLevel();
+      // rms is 0–1 (typically 0–0.3 in practice); scale to 0–100%
+      const pct = Math.min(100, Math.round(rms * 350));
+      const fill = $('#audio-level-fill');
+      const sqLabel = $('#audio-sq-label');
+      if (fill) {
+        fill.style.width = pct + '%';
+        fill.className = 'audio-level-fill' + (pct < 3 ? ' level-low' : pct < 60 ? ' level-mid' : ' level-high');
+      }
+      if (sqLabel) {
+        sqLabel.classList.toggle('hidden', pct >= 3);
+      }
+      audioState.levelRaf = requestAnimationFrame(tick);
+    }
+    audioState.levelRaf = requestAnimationFrame(tick);
+  }
+
+  function stopLevelMeter() {
+    if (audioState.levelRaf) cancelAnimationFrame(audioState.levelRaf);
+    audioState.levelRaf = null;
+    const fill = $('#audio-level-fill');
+    if (fill) { fill.style.width = '0%'; fill.className = 'audio-level-fill'; }
+    const sqLabel = $('#audio-sq-label');
+    if (sqLabel) sqLabel.classList.add('hidden');
   }
 
   async function pollAudioStatus() {

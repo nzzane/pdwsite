@@ -1183,6 +1183,34 @@ a:hover { text-decoration: underline; }
   white-space: nowrap;
 }
 
+.audio-level {
+  width: 48px;
+  height: 6px;
+  background: #1e3a52;
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.audio-level-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
+  background: var(--success);
+  transition: width 0.08s linear, background-color 0.2s;
+}
+.audio-level-fill.level-low  { background: var(--text-muted); }
+.audio-level-fill.level-mid  { background: var(--success); }
+.audio-level-fill.level-high { background: var(--warning); }
+
+.audio-sq-label {
+  font-size: 0.65rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
 /* ─── Scrollbar ─── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
