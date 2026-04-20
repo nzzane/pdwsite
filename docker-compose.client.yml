@@ -1,0 +1,82 @@
+# ─── PDW Client (Pager Decoder) ───
+# Runs rtl_fm → multimon-ng → pdw-client.js to decode pager messages
+# and send them to the PDW Monitor server.
+#
+# Prerequisites:
+#   - PDW Monitor server running (docker compose up -d)
+#   - RTL-SDR USB dongle connected (tuned to pager frequency, e.g. 157.925 MHz)
+#
+# Usage:
+#   docker compose -f docker-compose.client.yml up -d
+#
+# Get your API key:
+#   docker exec pdw-monitor cat /data/.api-key
+
+services:
+  pdw-client:
+    build:
+      context: ./client
+    container_name: pdw-client
+    restart: unless-stopped
+
+    environment:
+      # ── Server connection ──
+      # When on the same Docker host, use the container name via pdw-net
+      - SERVER_URL=${CLIENT_SERVER_URL:-http://pdw-monitor:3000}
+      - API_KEY=${API_KEY:?Set API_KEY from: docker exec pdw-monitor cat /data/.api-key}
+
+      # ── RTL-SDR tuning ──
+      - RTL_FREQUENCY=${RTL_FREQUENCY:-157.925M}
+      - RTL_GAIN=${RTL_GAIN:-40}
+      - RTL_PPM=${RTL_PPM:-0}
+      - RTL_DEVICE=${RTL_DEVICE:-0}
+      - RTL_SAMPLE_RATE=${RTL_SAMPLE_RATE:-22050}
+      - RTL_SQUELCH=${RTL_SQUELCH:-0}
+
+      # ── Multimon-ng decoders ──
+      - DECODERS=${DECODERS:-POCSAG512,POCSAG1200,FLEX}
+
+      # ── Batching / dedup ──
+      - BATCH_SIZE=${BATCH_SIZE:-10}
+      - BATCH_INTERVAL_MS=${BATCH_INTERVAL_MS:-2000}
+      - DEDUP_WINDOW_S=${DEDUP_WINDOW_S:-30}
+      - MULTIPART_TIMEOUT_MS=${CLIENT_MULTIPART_TIMEOUT_MS:-10000}
+
+      # ── Capcodes to ignore (comma-separated) ──
+      - EXCLUDE_CAPCODES=${EXCLUDE_CAPCODES:-1234567}
+
+    # ── USB device access for RTL-SDR dongle ──
+    # Pass all USB devices; alternatively pin a specific device:
+    #   devices:
+    #     - /dev/bus/usb/001/004:/dev/bus/usb/001/004
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+
+    privileged: false
+    cap_add:
+      - SYS_RAWIO
+      - DAC_OVERRIDE
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+
+    stop_grace_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+    networks:
+      pdw-net: {}
+
+networks:
+  pdw-net:
+    external: true

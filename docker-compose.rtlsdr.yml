@@ -1,0 +1,76 @@
+# ─── RTL-SDR FireComm Audio Streaming ───
+# Tunes an RTL-SDR dongle to FireComm frequency, demodulates FM audio,
+# and streams MP3 to the PDW Monitor server for authenticated users.
+#
+# Prerequisites:
+#   - PDW Monitor server running (docker compose up -d)
+#   - RTL-SDR USB dongle connected (dedicated to FireComm, e.g. 75.5875 MHz)
+#   - Set RTL_STREAM_URL=http://rtlsdr:8090 in the server's .env
+#
+# Usage:
+#   docker compose -f docker-compose.rtlsdr.yml up -d
+#
+# NOTE: If you also run the PDW client, you need TWO RTL-SDR dongles
+# (one for pager decoding, one for FireComm audio).
+
+services:
+  rtlsdr:
+    build:
+      context: ./rtlsdr
+    container_name: pdw-rtlsdr
+    restart: unless-stopped
+
+    environment:
+      # NZ FireComm primary frequency (NFM)
+      - FREQ=${RTL_FIRE_FREQ:-75.5875M}
+      - MODE=${RTL_FIRE_MODE:-fm}
+      # Gain: 0 = auto, 1-50 = manual dB (start with 40, adjust for your location)
+      - GAIN=${RTL_FIRE_GAIN:-40}
+      # Squelch: 0 = open (hear everything), higher = squelch noise (try 10-20)
+      - SQUELCH=${RTL_FIRE_SQUELCH:-0}
+      - SAMPLE_RATE=200000
+      - STREAM_PORT=8090
+
+    # ── USB device access for RTL-SDR dongle ──
+    # Pass all USB devices; alternatively pin a specific device:
+    #   devices:
+    #     - /dev/bus/usb/001/004:/dev/bus/usb/001/004
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+
+    privileged: false
+    cap_add:
+      - SYS_RAWIO
+      - DAC_OVERRIDE
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+
+    stop_grace_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+    # Internal only — accessible to pdw-monitor via pdw-net, not from outside Docker
+    networks:
+      pdw-net: {}
+
+networks:
+  pdw-net:
+    external: true
