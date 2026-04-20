@@ -246,21 +246,26 @@ const server = http.createServer((req, res) => {
       return;
     }
     autoSquelching = true;
-    stopPipeline(); // free the SDR device
-    measureNoiseFloor()
-      .then((result) => {
-        currentSquelch = result.suggested;
-        autoSquelching = false;
-        startPipeline();
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ ok: true, ...result, squelch: currentSquelch }));
-      })
-      .catch((err) => {
-        autoSquelching = false;
-        startPipeline();
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
-      });
+    stopPipeline();
+    // Wait for the OS to fully release the USB device before opening it again.
+    // usb_claim_interface error -6 occurs when the previous rtl_fm process
+    // hasn't fully exited yet. 1.5 s is enough on all tested hardware.
+    setTimeout(() => {
+      measureNoiseFloor()
+        .then((result) => {
+          currentSquelch = result.suggested;
+          autoSquelching = false;
+          startPipeline();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ ok: true, ...result, squelch: currentSquelch }));
+        })
+        .catch((err) => {
+          autoSquelching = false;
+          startPipeline();
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        });
+    }, 1500);
     return;
   }
 
