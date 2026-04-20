@@ -2858,7 +2858,8 @@
 
   async function initAudioPlayer() {
     try {
-      const data = await api('/api/audio/status');
+      const resp = await fetch('/api/audio/status');
+      const data = await resp.json();
       if (!data.available) return;
       audioState.available = true;
       audioState.freq = data.freq || '';
@@ -2876,12 +2877,15 @@
       updateAudioDot('ready');
       updateListenerCount(data.clients);
 
-      // Create persistent <audio> element (not in DOM; used as source)
+      // Create persistent <audio> element
       if (!audioState.el) {
         audioState.el = new Audio();
         audioState.el.preload = 'none';
         audioState.el.volume = audioState.volume;
         audioState.el.muted = audioState.muted;
+
+        // 'playing' fires once the stream starts delivering data.
+        // The stream stays connected even when squelch gates the audio.
         audioState.el.addEventListener('playing', () => {
           audioState.playing = true;
           updateAudioDot('playing');
@@ -2921,7 +2925,7 @@
       $('#btn-audio-mute').addEventListener('click', () => setAudioMute(!audioState.muted));
       $('#btn-audio-settings').addEventListener('click', showAudioSettingsModal);
 
-      // Poll status every 30s to update listener count / availability
+      // Poll status every 30s to update listener count
       audioState.statusPollTimer = setInterval(pollAudioStatus, 30000);
     } catch { /* audio feature unavailable - bar stays hidden */ }
   }
@@ -2936,7 +2940,7 @@
     const dot = $('#audio-status-dot');
     if (!dot) return;
     dot.className = 'audio-dot audio-dot-' + state_;
-    const titles = { off: 'Unavailable', ready: 'Ready', playing: 'Streaming', error: 'Error' };
+    const titles = { off: 'Unavailable', ready: 'Ready', playing: 'Connected — streaming', error: 'Disconnected' };
     dot.title = titles[state_] || state_;
   }
 
@@ -2961,19 +2965,13 @@
     playBtn.setAttribute('aria-label', isPlaying ? 'Stop stream' : 'Play stream');
   }
 
-  function audioStreamUrl() {
-    // <audio> elements can't send Authorization headers; pass token as query param instead
-    return `/api/audio/stream?token=${encodeURIComponent(state.token || '')}`;
-  }
-
   function toggleAudioPlay() {
     if (!audioState.el) return;
     if (audioState.playing) {
       audioState.el.pause();
       audioState.el.src = '';
     } else {
-      // Always re-open stream to get live audio (not buffered data)
-      audioState.el.src = audioStreamUrl();
+      audioState.el.src = '/api/audio/stream';
       audioState.el.load();
       audioState.el.play().catch(() => {
         updateAudioDot('error');
@@ -3065,7 +3063,8 @@
 
   async function pollAudioStatus() {
     try {
-      const data = await api('/api/audio/status');
+      const resp = await fetch('/api/audio/status');
+      const data = await resp.json();
       if (!data.available) {
         updateAudioDot('error');
         return;
@@ -3079,7 +3078,8 @@
   async function showAudioSettingsModal() {
     let settings = { freq: '', mode: 'fm', gain: '40', squelch: '0' };
     try {
-      settings = await api('/api/audio/settings');
+      const r = await fetch('/api/audio/settings');
+      if (r.ok) settings = await r.json();
     } catch { /* use defaults */ }
 
     showModal('RTL-SDR Settings', `
@@ -3152,7 +3152,7 @@
           audioState.el.src = '';
           setTimeout(() => {
             if (audioState.el) {
-              audioState.el.src = audioStreamUrl();
+              audioState.el.src = '/api/audio/stream';
               audioState.el.load();
               audioState.el.play().catch(() => {});
             }

@@ -344,8 +344,8 @@ router.get('/api/regions', requireAuth, (req, res) => {
 });
 
 // ─── Audio stream proxy (RTL-SDR FireComm radio) ───
-// The rtlsdr container broadcasts MP3 audio on an internal network.
-// These routes proxy + authenticate access so only logged-in users can listen.
+// The rtlsdr container is on an internal Docker network (not browser-reachable).
+// These routes proxy access — no auth required so <audio> elements just work.
 
 function getRtlStreamUrl() {
   return config.RTL_STREAM_URL || '';
@@ -372,8 +372,7 @@ function proxyRtlRequest(path, options, res, fallback) {
   return proxyReq;
 }
 
-// Check if RTL-SDR container is configured and reachable
-router.get('/api/audio/status', requireAuth, (req, res) => {
+router.get('/api/audio/status', (req, res) => {
   if (!getRtlStreamUrl()) {
     return res.json({ available: false, reason: 'RTL_STREAM_URL not configured' });
   }
@@ -394,8 +393,7 @@ router.get('/api/audio/status', requireAuth, (req, res) => {
   });
 });
 
-// Proxy authenticated audio stream — streams MP3 directly to browser
-router.get('/api/audio/stream', requireAuth, (req, res) => {
+router.get('/api/audio/stream', (req, res) => {
   const base = getRtlStreamUrl();
   if (!base) {
     return res.status(503).json({ error: 'Audio stream not configured' });
@@ -421,8 +419,7 @@ router.get('/api/audio/stream', requireAuth, (req, res) => {
   });
 });
 
-// Admin: get/set RTL-SDR settings (stored in DB for persistence)
-router.get('/api/audio/settings', requireAuth, (req, res) => {
+router.get('/api/audio/settings', (req, res) => {
   try {
     const keys = ['rtl_freq', 'rtl_mode', 'rtl_gain', 'rtl_squelch'];
     const rows = db.prepare(`SELECT key, value FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`).all(...keys);
