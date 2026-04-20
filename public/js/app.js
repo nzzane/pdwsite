@@ -2884,28 +2884,18 @@
         audioState.el.volume = audioState.volume;
         audioState.el.muted = audioState.muted;
 
-        // 'playing' fires once the stream starts delivering data.
-        // The stream stays connected even when squelch gates the audio.
-        audioState.el.addEventListener('playing', () => {
-          audioState.playing = true;
-          updateAudioDot('playing');
-          setPlayBtnState(true);
-          setupAudioAnalyser();
-          startLevelMeter();
-        });
-        audioState.el.addEventListener('pause',  () => {
-          audioState.playing = false;
-          updateAudioDot('ready');
-          setPlayBtnState(false);
-          stopLevelMeter();
-        });
+        // State is set immediately in toggleAudioPlay() so users see
+        // "connected" even when squelch gates the audio (no MP3 data).
+        // These listeners handle unexpected disconnects / errors.
         audioState.el.addEventListener('error',  () => {
+          if (!audioState.playing) return;
           audioState.playing = false;
           updateAudioDot('error');
           setPlayBtnState(false);
           stopLevelMeter();
         });
         audioState.el.addEventListener('ended', () => {
+          if (!audioState.playing) return;
           audioState.playing = false;
           updateAudioDot('ready');
           setPlayBtnState(false);
@@ -2969,13 +2959,28 @@
     if (!audioState.el) return;
     if (audioState.playing) {
       audioState.el.pause();
-      audioState.el.src = '';
+      audioState.el.removeAttribute('src');
+      audioState.el.load();
+      audioState.playing = false;
+      updateAudioDot('ready');
+      setPlayBtnState(false);
+      stopLevelMeter();
     } else {
+      // Show connected state immediately — don't wait for 'playing' event
+      // because squelch can starve ffmpeg (no MP3 chunks) and the browser
+      // never fires 'playing' while the stream is silent.
+      audioState.playing = true;
+      updateAudioDot('playing');
+      setPlayBtnState(true);
+      setupAudioAnalyser();
+      startLevelMeter();
       audioState.el.src = '/api/audio/stream';
       audioState.el.load();
       audioState.el.play().catch(() => {
+        audioState.playing = false;
         updateAudioDot('error');
         setPlayBtnState(false);
+        stopLevelMeter();
       });
     }
   }

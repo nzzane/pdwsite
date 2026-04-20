@@ -399,6 +399,12 @@ router.get('/api/audio/stream', (req, res) => {
     return res.status(503).json({ error: 'Audio stream not configured' });
   }
   const url = new URL('/stream', base);
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try { proxyReq.destroy(); } catch {}
+  };
   const proxyReq = http.get({ hostname: url.hostname, port: url.port || 80, path: '/stream', timeout: 0 }, (proxyRes) => {
     res.writeHead(200, {
       'Content-Type':      'audio/mpeg',
@@ -408,15 +414,15 @@ router.get('/api/audio/stream', (req, res) => {
       'X-Content-Type-Options': 'nosniff',
     });
     proxyRes.pipe(res, { end: true });
-    const cleanup = () => { try { proxyRes.destroy(); proxyReq.destroy(); } catch {} };
-    req.on('close', cleanup);
-    req.on('error', cleanup);
     proxyRes.on('error', cleanup);
   });
   proxyReq.on('error', (err) => {
     if (!res.headersSent) res.status(503).json({ error: 'Audio stream unavailable' });
-    logError('audio.stream.proxy', err);
+    else cleanup();
   });
+  // Clean up when the browser disconnects (both req and res for reliability)
+  req.on('close', cleanup);
+  res.on('close', cleanup);
 });
 
 router.get('/api/audio/settings', (req, res) => {
