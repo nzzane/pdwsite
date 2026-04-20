@@ -247,6 +247,35 @@
     </main>
   </div>
 
+  <!-- Audio player bar (shown only when RTL-SDR stream is available) -->
+  <div id="audio-player" class="audio-player hidden" role="region" aria-label="FireComm Audio">
+    <div class="audio-player-inner">
+      <div class="audio-info">
+        <span id="audio-status-dot" class="audio-dot audio-dot-off" title="Stream status"></span>
+        <span id="audio-freq-label" class="audio-freq">FireComm</span>
+      </div>
+      <div class="audio-controls">
+        <button id="btn-audio-play" class="btn-icon audio-btn" aria-label="Play stream" title="Play FireComm audio">
+          <!-- Play icon -->
+          <svg id="audio-icon-play" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5,3 19,12 5,21"/></svg>
+          <!-- Stop icon (hidden by default) -->
+          <svg id="audio-icon-stop" class="hidden" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+        </button>
+        <input id="audio-volume" type="range" min="0" max="1" step="0.05" value="0.8" class="audio-volume" aria-label="Volume">
+        <button id="btn-audio-mute" class="btn-icon audio-btn" aria-label="Mute" title="Mute">
+          <svg id="audio-icon-vol" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><path d="M19.07 4.93a10 10 0 010 14.14"/><path d="M15.54 8.46a5 5 0 010 7.07"/></svg>
+          <svg id="audio-icon-mute" class="hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+        </button>
+      </div>
+      <div class="audio-actions">
+        <span id="audio-listener-count" class="audio-listeners hidden"></span>
+        <button id="btn-audio-settings" class="btn-icon audio-btn admin-only hidden" aria-label="Audio settings" title="RTL-SDR Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
   <!-- Modal overlay -->
   <div id="modal-overlay" class="modal-overlay hidden">
     <div id="modal" class="modal">

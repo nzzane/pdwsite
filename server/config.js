@@ -26,4 +26,8 @@ module.exports = {
 
   // Multipart message join timeout (ms) - how long to wait for remaining parts
   MULTIPART_TIMEOUT_MS: parseInt(process.env.MULTIPART_TIMEOUT_MS || '10000', 10),
+
+  // RTL-SDR audio stream URL (the rtlsdr container's internal address)
+  // Empty string disables audio feature entirely
+  RTL_STREAM_URL: process.env.RTL_STREAM_URL || '',
 };

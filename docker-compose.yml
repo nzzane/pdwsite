@@ -31,6 +31,10 @@ services:
       - MULTIPART_TIMEOUT_MS=${MULTIPART_TIMEOUT_MS:-10000}
       - NODE_ENV=production
 
+      # ── RTL-SDR audio stream URL (internal Docker network) ──
+      # Leave empty to disable audio player feature
+      - RTL_STREAM_URL=${RTL_STREAM_URL:-http://rtlsdr:8090}
+
     # Health check (mirrors Dockerfile HEALTHCHECK but compose-level gives
     # more control for orchestration / depends_on with condition)
     healthcheck:
@@ -69,7 +73,70 @@ services:
     networks:
       br0.50:
         ipv4_address: 10.20.50.30
-        
+      pdw-internal: {}
+
+  # ── RTL-SDR FireComm radio streaming (requires RTL-SDR USB dongle) ──
+  # Tunes to the configured frequency, demodulates FM audio, streams MP3 to pdw-monitor
+  # The pdw-monitor proxies the stream to authenticated browser clients.
+  # Remove or comment out this service if you don't have an RTL-SDR dongle.
+  rtlsdr:
+    build:
+      context: ./rtlsdr
+    container_name: pdw-rtlsdr
+    restart: unless-stopped
+
+    environment:
+      # NZ FireComm primary frequency (NFM)
+      - FREQ=${RTL_FIRE_FREQ:-75.5875M}
+      - MODE=${RTL_FIRE_MODE:-fm}
+      # Gain: 0 = auto, 1-50 = manual dB (start with 40, adjust for your location)
+      - GAIN=${RTL_FIRE_GAIN:-40}
+      # Squelch: 0 = open (hear everything), higher = squelch noise (try 10-20)
+      - SQUELCH=${RTL_FIRE_SQUELCH:-0}
+      - SAMPLE_RATE=200000
+      - STREAM_PORT=8090
+
+    # ── USB device access for RTL-SDR dongle ──
+    # Passes all USB devices to the container; alternatively pin a specific device:
+    #   devices:
+    #     - /dev/bus/usb/001/004:/dev/bus/usb/001/004
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+
+    # Required for USB hardware access
+    privileged: false
+    cap_add:
+      - SYS_RAWIO
+      - DAC_OVERRIDE
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+
+    stop_grace_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+    # Internal only — not accessible from outside Docker
+    networks:
+      pdw-internal: {}
+
 volumes:
   pdw-data:
     driver: local
@@ -77,3 +144,7 @@ volumes:
 networks:
   br0.50:
     external: true
+  # Internal network for pdw-monitor ↔ rtlsdr communication only
+  pdw-internal:
+    internal: true
+

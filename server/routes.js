@@ -1,4 +1,5 @@
 const express = require('express');
+const http = require('http');
 const { requireAuth, requireAdmin, requireApiKey, login, register } = require('./auth');
 const db = require('./db');
 const config = require('./config');
@@ -340,6 +341,155 @@ router.get('/api/messages/call-types', requireAuth, (req, res) => {
 
 router.get('/api/regions', requireAuth, (req, res) => {
   res.json({ regions: NZ_REGIONS, streetSuffixes: STREET_SUFFIXES });
+});
+
+// ─── Audio stream proxy (RTL-SDR FireComm radio) ───
+// The rtlsdr container broadcasts MP3 audio on an internal network.
+// These routes proxy + authenticate access so only logged-in users can listen.
+
+function getRtlStreamUrl() {
+  return config.RTL_STREAM_URL || '';
+}
+
+function proxyRtlRequest(path, options, res, fallback) {
+  const base = getRtlStreamUrl();
+  if (!base) {
+    if (fallback) fallback();
+    return;
+  }
+  const url = new URL(path, base);
+  const reqOpts = { hostname: url.hostname, port: url.port || 80, path: url.pathname, method: options.method || 'GET', timeout: 8000 };
+  const proxyReq = http.request(reqOpts, (proxyRes) => {
+    if (options.onResponse) options.onResponse(proxyRes);
+  });
+  proxyReq.on('error', (err) => {
+    if (options.onError) options.onError(err);
+  });
+  if (options.body) {
+    proxyReq.write(options.body);
+  }
+  proxyReq.end();
+  return proxyReq;
+}
+
+// Check if RTL-SDR container is configured and reachable
+router.get('/api/audio/status', requireAuth, (req, res) => {
+  if (!getRtlStreamUrl()) {
+    return res.json({ available: false, reason: 'RTL_STREAM_URL not configured' });
+  }
+  proxyRtlRequest('/status', {
+    onResponse: (proxyRes) => {
+      let body = '';
+      proxyRes.on('data', (d) => { body += d; });
+      proxyRes.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          res.json({ available: true, ...data });
+        } catch {
+          res.json({ available: false, reason: 'Invalid response from RTL-SDR container' });
+        }
+      });
+    },
+    onError: () => res.json({ available: false, reason: 'RTL-SDR container unreachable' }),
+  });
+});
+
+// Proxy authenticated audio stream — streams MP3 directly to browser
+router.get('/api/audio/stream', requireAuth, (req, res) => {
+  const base = getRtlStreamUrl();
+  if (!base) {
+    return res.status(503).json({ error: 'Audio stream not configured' });
+  }
+  const url = new URL('/stream', base);
+  const proxyReq = http.get({ hostname: url.hostname, port: url.port || 80, path: '/stream', timeout: 0 }, (proxyRes) => {
+    res.writeHead(200, {
+      'Content-Type':      'audio/mpeg',
+      'Cache-Control':     'no-cache, no-store',
+      'Connection':        'keep-alive',
+      'Transfer-Encoding': 'chunked',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    proxyRes.pipe(res, { end: true });
+    const cleanup = () => { try { proxyRes.destroy(); proxyReq.destroy(); } catch {} };
+    req.on('close', cleanup);
+    req.on('error', cleanup);
+    proxyRes.on('error', cleanup);
+  });
+  proxyReq.on('error', (err) => {
+    if (!res.headersSent) res.status(503).json({ error: 'Audio stream unavailable' });
+    logError('audio.stream.proxy', err);
+  });
+});
+
+// Admin: get/set RTL-SDR settings (stored in DB for persistence)
+router.get('/api/audio/settings', requireAuth, (req, res) => {
+  try {
+    const keys = ['rtl_freq', 'rtl_mode', 'rtl_gain', 'rtl_squelch'];
+    const rows = db.prepare(`SELECT key, value FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`).all(...keys);
+    const settings = { freq: '75.5875M', mode: 'fm', gain: '40', squelch: '0' };
+    for (const r of rows) {
+      const k = r.key.replace('rtl_', '');
+      settings[k] = r.value;
+    }
+    res.json(settings);
+  } catch (err) {
+    logError('audio.settings.get', err);
+    res.status(500).json({ error: 'Failed to load audio settings' });
+  }
+});
+
+router.put('/api/audio/settings', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const { freq, mode, gain, squelch } = req.body;
+    const allowed = { freq: freq, mode: mode, gain: gain, squelch: squelch };
+    const upsert = db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')");
+    for (const [k, v] of Object.entries(allowed)) {
+      if (v !== undefined) upsert.run('rtl_' + k, String(v), String(v));
+    }
+
+    // Push new settings to RTL-SDR container immediately (if running)
+    const body = JSON.stringify({ freq, mode, gain: parseInt(gain, 10), squelch: parseInt(squelch, 10) });
+    proxyRtlRequest('/control', {
+      method: 'POST',
+      body,
+      onResponse: () => {},
+      onError: () => {},
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    logError('audio.settings.put', err);
+    res.status(500).json({ error: 'Failed to save audio settings' });
+  }
+});
+
+// Admin: trigger auto-squelch measurement
+router.post('/api/audio/auto-squelch', requireAuth, requireAdmin, (req, res) => {
+  if (!getRtlStreamUrl()) return res.status(503).json({ error: 'RTL-SDR not configured' });
+  proxyRtlRequest('/auto-squelch', {
+    method: 'POST',
+    body: '',
+    onResponse: (proxyRes) => {
+      let body = '';
+      proxyRes.on('data', (d) => { body += d; });
+      proxyRes.on('end', () => {
+        try {
+          const result = JSON.parse(body);
+          if (result.ok) {
+            // Persist the new squelch value
+            db.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('rtl_squelch', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')").run(String(result.squelch), String(result.squelch));
+          }
+          res.status(proxyRes.statusCode).json(result);
+        } catch {
+          res.status(500).json({ error: 'Invalid response from RTL-SDR container' });
+        }
+      });
+    },
+    onError: (err) => {
+      logError('audio.auto-squelch', err);
+      res.status(503).json({ error: 'RTL-SDR container unreachable' });
+    },
+  });
 });
 
 // ─── Groups ───

@@ -2481,6 +2481,9 @@
     autoSubscribePush();
     updateNotificationBell();
 
+    // Initialise audio player if RTL-SDR stream is configured
+    initAudioPlayer();
+
     // Force password change if required
     if (state.user.must_change_password) {
       showForceChangePasswordModal();
@@ -2836,6 +2839,249 @@
     } catch (err) {
       console.warn('Auto push subscribe failed:', err.message);
     }
+  }
+
+  // ─── Audio Player ───
+  const audioState = {
+    available: false,
+    playing: false,
+    muted: false,
+    volume: parseFloat(localStorage.getItem('pdw_audio_vol') || '0.8'),
+    freq: '',
+    mode: '',
+    statusPollTimer: null,
+    el: null, // the <audio> element
+  };
+
+  async function initAudioPlayer() {
+    try {
+      const data = await api('/api/audio/status');
+      if (!data.available) return;
+      audioState.available = true;
+      audioState.freq = data.freq || '';
+
+      const bar = $('#audio-player');
+      bar.classList.remove('hidden');
+      document.getElementById('app-screen').classList.add('audio-player-visible');
+
+      // Show admin controls for admins
+      if (state.user && state.user.role === 'admin') {
+        bar.querySelectorAll('.admin-only').forEach(el => el.classList.remove('hidden'));
+      }
+
+      updateAudioFreqLabel(data.freq);
+      updateAudioDot('ready');
+      updateListenerCount(data.clients);
+
+      // Create persistent <audio> element (not in DOM; used as source)
+      if (!audioState.el) {
+        audioState.el = new Audio();
+        audioState.el.preload = 'none';
+        audioState.el.volume = audioState.volume;
+        audioState.el.muted = audioState.muted;
+        audioState.el.addEventListener('playing', () => {
+          audioState.playing = true;
+          updateAudioDot('playing');
+          setPlayBtnState(true);
+        });
+        audioState.el.addEventListener('pause',  () => {
+          audioState.playing = false;
+          updateAudioDot('ready');
+          setPlayBtnState(false);
+        });
+        audioState.el.addEventListener('error',  () => {
+          audioState.playing = false;
+          updateAudioDot('error');
+          setPlayBtnState(false);
+        });
+        audioState.el.addEventListener('ended', () => {
+          audioState.playing = false;
+          updateAudioDot('ready');
+          setPlayBtnState(false);
+        });
+      }
+      $('#audio-volume').value = audioState.volume;
+
+      // Bind controls
+      $('#btn-audio-play').addEventListener('click', toggleAudioPlay);
+      $('#audio-volume').addEventListener('input', (e) => {
+        audioState.volume = parseFloat(e.target.value);
+        if (audioState.el) audioState.el.volume = audioState.volume;
+        localStorage.setItem('pdw_audio_vol', audioState.volume);
+        if (audioState.muted && audioState.volume > 0) setAudioMute(false);
+      });
+      $('#btn-audio-mute').addEventListener('click', () => setAudioMute(!audioState.muted));
+      $('#btn-audio-settings').addEventListener('click', showAudioSettingsModal);
+
+      // Poll status every 30s to update listener count / availability
+      audioState.statusPollTimer = setInterval(pollAudioStatus, 30000);
+    } catch { /* audio feature unavailable - bar stays hidden */ }
+  }
+
+  function updateAudioFreqLabel(freq) {
+    const label = $('#audio-freq-label');
+    if (!label) return;
+    label.textContent = freq ? `FireComm ${freq}` : 'FireComm';
+  }
+
+  function updateAudioDot(state_) {
+    const dot = $('#audio-status-dot');
+    if (!dot) return;
+    dot.className = 'audio-dot audio-dot-' + state_;
+    const titles = { off: 'Unavailable', ready: 'Ready', playing: 'Streaming', error: 'Error' };
+    dot.title = titles[state_] || state_;
+  }
+
+  function updateListenerCount(n) {
+    const el = $('#audio-listener-count');
+    if (!el) return;
+    if (typeof n === 'number' && n >= 0) {
+      el.textContent = n === 1 ? '1 listener' : `${n} listeners`;
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+    }
+  }
+
+  function setPlayBtnState(isPlaying) {
+    const playBtn = $('#btn-audio-play');
+    if (!playBtn) return;
+    $('#audio-icon-play').classList.toggle('hidden', isPlaying);
+    $('#audio-icon-stop').classList.toggle('hidden', !isPlaying);
+    playBtn.classList.toggle('playing', isPlaying);
+    playBtn.title = isPlaying ? 'Stop audio' : 'Play FireComm audio';
+    playBtn.setAttribute('aria-label', isPlaying ? 'Stop stream' : 'Play stream');
+  }
+
+  function toggleAudioPlay() {
+    if (!audioState.el) return;
+    if (audioState.playing) {
+      audioState.el.pause();
+      audioState.el.src = '';
+    } else {
+      // Always re-open stream to get live audio (not buffered data)
+      audioState.el.src = '/api/audio/stream';
+      audioState.el.load();
+      audioState.el.play().catch(() => {
+        updateAudioDot('error');
+        setPlayBtnState(false);
+      });
+    }
+  }
+
+  function setAudioMute(muted) {
+    audioState.muted = muted;
+    if (audioState.el) audioState.el.muted = muted;
+    const volIcon  = $('#audio-icon-vol');
+    const muteIcon = $('#audio-icon-mute');
+    if (volIcon)  volIcon.classList.toggle('hidden', muted);
+    if (muteIcon) muteIcon.classList.toggle('hidden', !muted);
+    const btn = $('#btn-audio-mute');
+    if (btn) {
+      btn.title = muted ? 'Unmute' : 'Mute';
+      btn.setAttribute('aria-label', muted ? 'Unmute' : 'Mute');
+    }
+  }
+
+  async function pollAudioStatus() {
+    try {
+      const data = await api('/api/audio/status');
+      if (!data.available) {
+        updateAudioDot('error');
+        return;
+      }
+      if (!audioState.playing) updateAudioDot('ready');
+      updateListenerCount(data.clients);
+    } catch { /* ignore */ }
+  }
+
+  // ─── Audio Settings Modal (admin) ───
+  async function showAudioSettingsModal() {
+    let settings = { freq: '', mode: 'fm', gain: '40', squelch: '0' };
+    try {
+      settings = await api('/api/audio/settings');
+    } catch { /* use defaults */ }
+
+    showModal('RTL-SDR Settings', `
+      <div class="form-group">
+        <label>Frequency (e.g. 75.5875M)</label>
+        <input type="text" id="rtl-freq" value="${esc(settings.freq || '')}" placeholder="75.5875M">
+      </div>
+      <div class="form-group">
+        <label>Mode</label>
+        <select id="rtl-mode">
+          <option value="fm"  ${settings.mode === 'fm'  ? 'selected' : ''}>FM (wideband)</option>
+          <option value="nfm" ${settings.mode === 'nfm' ? 'selected' : ''}>NFM (narrowband)</option>
+          <option value="am"  ${settings.mode === 'am'  ? 'selected' : ''}>AM</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Gain (0 = auto, 1–50 = manual dB)</label>
+        <input type="number" id="rtl-gain" value="${esc(String(settings.gain || '40'))}" min="0" max="50">
+      </div>
+      <div class="form-group">
+        <label>Squelch (0 = open)</label>
+        <input type="number" id="rtl-squelch" value="${esc(String(settings.squelch || '0'))}" min="0" max="50">
+      </div>
+      <div style="margin-top:0.5rem">
+        <button class="btn btn-sm btn-secondary" id="btn-auto-squelch-modal">Auto Squelch</button>
+        <span id="auto-squelch-status" style="font-size:0.8rem;color:var(--text-dim);margin-left:0.5rem"></span>
+      </div>
+    `, `
+      <button class="btn" id="modal-cancel">Cancel</button>
+      <button class="btn btn-primary" id="modal-save-rtl">Save &amp; Apply</button>
+    `);
+
+    $('#modal-cancel').onclick = hideModal;
+
+    $('#btn-auto-squelch-modal').onclick = async () => {
+      const statusEl = $('#auto-squelch-status');
+      const btn = $('#btn-auto-squelch-modal');
+      btn.disabled = true;
+      statusEl.textContent = 'Measuring noise floor (3–5s)…';
+      try {
+        const result = await api('/api/audio/auto-squelch', { method: 'POST' });
+        statusEl.textContent = `Suggested: ${result.suggested} — applied (squelch=${result.squelch})`;
+        const squelchInput = $('#rtl-squelch');
+        if (squelchInput) squelchInput.value = result.squelch;
+      } catch (err) {
+        statusEl.textContent = 'Error: ' + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    };
+
+    $('#modal-save-rtl').onclick = async () => {
+      const freq    = $('#rtl-freq').value.trim();
+      const mode    = $('#rtl-mode').value;
+      const gain    = $('#rtl-gain').value;
+      const squelch = $('#rtl-squelch').value;
+      if (!freq) return toast('Frequency is required', 'error');
+      try {
+        await api('/api/audio/settings', {
+          method: 'PUT',
+          body: JSON.stringify({ freq, mode, gain, squelch }),
+        });
+        audioState.freq = freq;
+        updateAudioFreqLabel(freq);
+        hideModal();
+        toast('RTL-SDR settings saved', 'success');
+        // If currently playing, restart stream with new settings
+        if (audioState.playing && audioState.el) {
+          audioState.el.pause();
+          audioState.el.src = '';
+          setTimeout(() => {
+            if (audioState.el) {
+              audioState.el.src = '/api/audio/stream';
+              audioState.el.load();
+              audioState.el.play().catch(() => {});
+            }
+          }, 1500);
+        }
+      } catch (err) {
+        toast(err.message, 'error');
+      }
+    };
   }
 
   // ─── Init ───
