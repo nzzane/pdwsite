@@ -1,0 +1,7 @@
+# ─── PDW Monitor Database Backup Cron Example ───
+# Install with: sudo cp pdw-backup.cron /etc/cron.d/pdw-backup
+# Or add to crontab: crontab -e
+
+# Daily backup at 2:00 AM, keep 30 backups
+# Adjust PDW_DB_PATH and BACKUP_DIR to match your deployment
+0 2 * * * root PDW_DB_PATH=/var/lib/docker/volumes/pdw-data/_data/pdw.db BACKUP_DIR=/var/lib/docker/volumes/pdw-data/_data/backups MAX_BACKUPS=30 /opt/pdw/scripts/backup.sh >> /var/log/pdw-backup.log 2>&1

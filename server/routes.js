@@ -1,0 +1,1747 @@
+const express = require('express');
+const http = require('http');
+const path = require('path');
+const Database = require('better-sqlite3');
+const { requireAuth, requireAdmin, requireApiKey, login, register } = require('./auth');
+const db = require('./db');
+const config = require('./config');
+const parser = require('./parser');
+const webpush = require('web-push');
+const { logError, logWarn } = require('./logger');
+const { NZ_REGIONS, STREET_SUFFIXES, contentMatchesRegion } = require('./regions');
+
+const router = express.Router();
+
+// ─── Broadcast helper (set by server on startup) ───
+let broadcast = () => {};
+function setBroadcast(fn) {
+  broadcast = fn;
+}
+
+// ─── Health check (unauthenticated - used by Docker HEALTHCHECK) ───
+router.get('/api/health', (req, res) => {
+  try {
+    // Verify DB is accessible
+    const row = db.prepare("SELECT COUNT(*) as count FROM users").get();
+    const wsClients = req.app.get('wsClientCount') || 0;
+    res.json({
+      status: 'ok',
+      uptime: Math.floor(process.uptime()),
+      memory: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      db: 'ok',
+      users: row.count,
+      wsClients,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (err) {
+    res.status(503).json({ status: 'error', error: err.message });
+  }
+});
+
+// ─── Auth routes ───
+
+router.post('/api/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+    const result = await login(username, password);
+    if (!result) return res.status(401).json({ error: 'Invalid credentials' });
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: 'Login failed' });
+  }
+});
+
+router.post('/api/auth/register', requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { username, password, role, must_change_password } = req.body;
+    if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+    if (role && role !== 'user' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
+    const result = await register(username, password, role || 'user', !!must_change_password);
+    res.json(result);
+  } catch (err) {
+    if (err.message && err.message.includes('UNIQUE')) {
+      return res.status(409).json({ error: 'Username already exists' });
+    }
+    res.status(500).json({ error: 'Registration failed' });
+  }
+});
+
+router.get('/api/auth/me', requireAuth, (req, res) => {
+  const user = db.prepare('SELECT id, username, role, must_change_password FROM users WHERE id = ?').get(req.user.id);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+  res.json({ ...user, must_change_password: !!user.must_change_password });
+});
+
+router.post('/api/auth/change-password', requireAuth, async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Both passwords required' });
+    const bcrypt = require('bcrypt');
+    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const valid = await bcrypt.compare(currentPassword, user.password_hash);
+    if (!valid) return res.status(401).json({ error: 'Current password incorrect' });
+    const hash = await bcrypt.hash(newPassword, 12);
+    db.prepare('UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?').run(hash, req.user.id);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Password change failed' });
+  }
+});
+
+// ─── Admin: user management ───
+
+router.get('/api/admin/users', requireAuth, requireAdmin, (req, res) => {
+  const users = db.prepare('SELECT id, username, role, must_change_password, created_at FROM users ORDER BY id').all();
+  res.json(users);
+});
+
+router.delete('/api/admin/users/:id', requireAuth, requireAdmin, (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  if (userId === req.user.id) return res.status(400).json({ error: 'Cannot delete yourself' });
+  db.prepare('DELETE FROM users WHERE id = ?').run(userId);
+  res.json({ ok: true });
+});
+
+router.put('/api/admin/users/:id/role', requireAuth, requireAdmin, (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  const { role } = req.body;
+  if (role !== 'user' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
+  db.prepare('UPDATE users SET role = ? WHERE id = ?').run(role, userId);
+  res.json({ ok: true });
+});
+
+// ─── Admin: settings ───
+
+router.get('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
+  const rows = db.prepare("SELECT key, value FROM settings").all();
+  const settings = {};
+  for (const row of rows) {
+    settings[row.key] = row.value;
+  }
+  // If api_key not in DB yet, show the env var value
+  if (!settings.api_key) {
+    settings.api_key = config.API_KEY || '';
+  }
+  res.json(settings);
+});
+
+router.put('/api/admin/settings', requireAuth, requireAdmin, (req, res) => {
+  const { key, value } = req.body;
+  if (!key || typeof value !== 'string') return res.status(400).json({ error: 'Key and value required' });
+  // Only allow known settings keys
+  const allowedKeys = ['api_key'];
+  if (!allowedKeys.includes(key)) return res.status(400).json({ error: 'Unknown setting: ' + key });
+  db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')").run(key, value, value);
+  res.json({ ok: true });
+});
+
+router.post('/api/admin/settings/regenerate-api-key', requireAuth, requireAdmin, (req, res) => {
+  const crypto = require('crypto');
+  const newKey = 'pdw_' + crypto.randomBytes(24).toString('base64url');
+  db.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('api_key', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')").run(newKey, newKey);
+  res.json({ api_key: newKey });
+});
+
+// ─── Admin: error log ───
+
+router.get('/api/admin/error-log', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+    const offset = parseInt(req.query.offset, 10) || 0;
+    const level = req.query.level || null;
+
+    let sql = 'SELECT * FROM error_log';
+    const params = [];
+    if (level) {
+      sql += ' WHERE level = ?';
+      params.push(level);
+    }
+    sql += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
+    params.push(limit, offset);
+
+    const logs = db.prepare(sql).all(...params);
+    const total = db.prepare(
+      level ? 'SELECT COUNT(*) as c FROM error_log WHERE level = ?' : 'SELECT COUNT(*) as c FROM error_log'
+    ).get(...(level ? [level] : [])).c;
+
+    res.json({ logs, total });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch error log' });
+  }
+});
+
+router.delete('/api/admin/error-log', requireAuth, requireAdmin, (req, res) => {
+  try {
+    db.prepare('DELETE FROM error_log').run();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to clear error log' });
+  }
+});
+
+// ─── Messages ───
+
+// Helper: build WHERE conditions + params from query filters (shared by messages + count endpoints)
+function buildMessageQuery(query) {
+  const {
+    capcode, call_type, exclude_call_type, location, trucks,
+    group_id, search, since, until, protocol, region,
+  } = query;
+
+  let from = 'SELECT DISTINCT m.* FROM messages m';
+  const params = [];
+  const conditions = [];
+
+  if (group_id) {
+    const gid = parseInt(group_id, 10);
+    from += ` LEFT JOIN group_members gm ON LTRIM(m.capcode, '0') = LTRIM(gm.capcode, '0') AND gm.group_id = ?`;
+    from += ` LEFT JOIN group_keywords gk ON gk.group_id = ? AND m.content LIKE '%' || gk.keyword || '%'`;
+    conditions.push('(gm.id IS NOT NULL OR gk.id IS NOT NULL)');
+    params.push(gid, gid);
+  }
+
+  // Exclude hidden capcodes by default
+  conditions.push("NOT EXISTS (SELECT 1 FROM capcode_aliases ca WHERE ca.capcode = CASE WHEN LENGTH(LTRIM(m.capcode, '0')) = 0 THEN '0' ELSE LTRIM(m.capcode, '0') END AND ca.hidden = 1)");
+
+  if (capcode) { conditions.push('m.capcode = ?'); params.push(capcode); }
+  if (call_type) { conditions.push('m.call_type = ?'); params.push(call_type); }
+  if (exclude_call_type) {
+    const excludeTypes = exclude_call_type.split(',').map(t => t.trim()).filter(Boolean);
+    if (excludeTypes.length === 1) {
+      conditions.push('(m.call_type IS NULL OR m.call_type != ?)');
+      params.push(excludeTypes[0]);
+    } else if (excludeTypes.length > 1) {
+      conditions.push(`(m.call_type IS NULL OR m.call_type NOT IN (${excludeTypes.map(() => '?').join(',')}))`);
+      params.push(...excludeTypes);
+    }
+  }
+  if (location) { conditions.push('m.location LIKE ?'); params.push(`%${location}%`); }
+  if (trucks) { conditions.push('m.trucks LIKE ?'); params.push(`%${trucks}%`); }
+  if (search) { conditions.push('m.content LIKE ?'); params.push(`%${search}%`); }
+  if (protocol) { conditions.push('m.protocol = ?'); params.push(protocol); }
+  if (since) { conditions.push('m.received_at > ?'); params.push(since.replace('T', ' ')); }
+  if (until) { conditions.push('m.received_at < ?'); params.push(until.replace('T', ' ')); }
+
+  const regionData = region ? NZ_REGIONS.find(r => r.name === region) : null;
+  if (regionData && regionData.terms.length > 0) {
+    const termConditions = regionData.terms.map(() => 'm.content LIKE ?');
+    conditions.push(`(${termConditions.join(' OR ')})`);
+    for (const term of regionData.terms) params.push(`%${term}%`);
+  }
+
+  let where = '';
+  if (conditions.length > 0) where = ' WHERE ' + conditions.join(' AND ');
+
+  return { from, where, params, regionData };
+}
+
+// Helper: enrich messages with computed fields
+function enrichMessages(messages) {
+  const aliasStmt = db.prepare('SELECT alias, colour, icon, notes FROM capcode_aliases WHERE capcode = ?');
+  for (const msg of messages) {
+    const priority = parser.extractPriority(msg.content);
+    if (priority) msg.priority = priority;
+    const alias = aliasStmt.get(parser.normalizeCapcode(msg.capcode));
+    if (alias) {
+      msg.alias = alias.alias;
+      msg.alias_colour = alias.colour;
+      msg.alias_notes = alias.notes;
+    }
+    const incidentNum = parser.extractIncidentNumber(msg.content);
+    if (incidentNum) msg.incident_number = incidentNum;
+    const alarmLvl = parser.extractAlarmLevel(msg.content);
+    if (alarmLvl) msg.alarm_level = alarmLvl;
+  }
+  return messages;
+}
+
+router.get('/api/messages', requireAuth, (req, res) => {
+  try {
+    const { limit = 100, offset = 0 } = req.query;
+    const { from, where, params, regionData } = buildMessageQuery(req.query);
+
+    const requestedLimit = Math.min(parseInt(limit, 10) || 100, 500);
+    const requestedOffset = parseInt(offset, 10) || 0;
+
+    // Over-fetch when region filtering is active (broad SQL LIKE → precise JS post-filter)
+    const sqlLimit = regionData ? requestedLimit * 3 : requestedLimit;
+
+    const sql = from + where + ' ORDER BY m.received_at DESC LIMIT ? OFFSET ?';
+    let messages = db.prepare(sql).all(...params, sqlLimit, requestedOffset);
+
+    // Post-query region filter: precise word-boundary + street-suffix matching
+    if (regionData) {
+      messages = messages.filter(msg => contentMatchesRegion(msg.content, regionData));
+      messages = messages.slice(0, requestedLimit);
+    }
+
+    res.json(enrichMessages(messages));
+  } catch (err) {
+    logError('GET /api/messages failed', err);
+    res.status(500).json({ error: 'Failed to load messages' });
+  }
+});
+
+// Count endpoint for pagination (returns total matching messages so UI can show page numbers)
+router.get('/api/messages/count', requireAuth, (req, res) => {
+  try {
+    const { from, where, params } = buildMessageQuery(req.query);
+    const countSql = from.replace('SELECT DISTINCT m.*', 'SELECT COUNT(DISTINCT m.id) as total') + where;
+    const row = db.prepare(countSql).get(...params);
+    res.json({ total: row ? row.total : 0 });
+  } catch (err) {
+    logError('GET /api/messages/count failed', err);
+    res.status(500).json({ error: 'Failed to count messages' });
+  }
+});
+
+router.get('/api/messages/stats', requireAuth, (req, res) => {
+  const total = db.prepare('SELECT COUNT(*) as count FROM messages').get().count;
+  const today = db.prepare("SELECT COUNT(*) as count FROM messages WHERE received_at > datetime('now', '-1 day')").get().count;
+  const callTypes = db.prepare(
+    "SELECT call_type, COUNT(*) as count FROM messages WHERE call_type IS NOT NULL AND received_at > datetime('now', '-1 day') GROUP BY call_type ORDER BY count DESC"
+  ).all();
+  const topCapcodes = db.prepare(
+    "SELECT capcode, COUNT(*) as count FROM messages WHERE received_at > datetime('now', '-1 day') GROUP BY capcode ORDER BY count DESC LIMIT 20"
+  ).all();
+
+  // Enrich top capcodes with alias and recent trucks
+  const aliasStmt = db.prepare('SELECT alias, colour FROM capcode_aliases WHERE capcode = ?');
+  const trucksStmt = db.prepare(
+    "SELECT DISTINCT trucks FROM messages WHERE capcode = ? AND trucks IS NOT NULL AND trucks != '' AND received_at > datetime('now', '-1 day') ORDER BY received_at DESC LIMIT 5"
+  );
+  for (const cc of topCapcodes) {
+    const normCap = parser.normalizeCapcode(cc.capcode);
+    const alias = aliasStmt.get(normCap);
+    if (alias) {
+      cc.alias = alias.alias;
+      cc.alias_colour = alias.colour;
+    }
+    const truckRows = trucksStmt.all(cc.capcode);
+    const truckSet = new Set();
+    for (const r of truckRows) {
+      for (const t of r.trucks.split(',')) {
+        const trimmed = t.trim();
+        if (trimmed) truckSet.add(trimmed);
+      }
+    }
+    if (truckSet.size > 0) cc.trucks = Array.from(truckSet).slice(0, 5);
+  }
+
+  res.json({ total, today, callTypes, topCapcodes });
+});
+
+router.get('/api/messages/call-types', requireAuth, (req, res) => {
+  const types = parser.CALL_TYPE_PATTERNS.map((p) => ({
+    type: p.type,
+    colour: p.colour,
+  }));
+  res.json(types);
+});
+
+// ─── Regions ───
+
+router.get('/api/regions', requireAuth, (req, res) => {
+  res.json({ regions: NZ_REGIONS, streetSuffixes: STREET_SUFFIXES });
+});
+
+// ─── Audio stream proxy (RTL-SDR FireComm radio) ───
+// The rtlsdr container is on an internal Docker network (not browser-reachable).
+// These routes proxy access — no auth required so <audio> elements just work.
+
+function getRtlStreamUrl() {
+  return config.RTL_STREAM_URL || '';
+}
+
+function proxyRtlRequest(path, options, res, fallback) {
+  const base = getRtlStreamUrl();
+  if (!base) {
+    if (fallback) fallback();
+    return;
+  }
+  const url = new URL(path, base);
+  const reqOpts = { hostname: url.hostname, port: url.port || 80, path: url.pathname, method: options.method || 'GET', timeout: 8000 };
+  const proxyReq = http.request(reqOpts, (proxyRes) => {
+    if (options.onResponse) options.onResponse(proxyRes);
+  });
+  proxyReq.on('error', (err) => {
+    if (options.onError) options.onError(err);
+  });
+  if (options.body) {
+    proxyReq.write(options.body);
+  }
+  proxyReq.end();
+  return proxyReq;
+}
+
+router.get('/api/audio/status', (req, res) => {
+  if (!getRtlStreamUrl()) {
+    return res.json({ available: false, reason: 'RTL_STREAM_URL not configured' });
+  }
+  proxyRtlRequest('/status', {
+    onResponse: (proxyRes) => {
+      let body = '';
+      proxyRes.on('data', (d) => { body += d; });
+      proxyRes.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          res.json({ available: true, ...data });
+        } catch {
+          res.json({ available: false, reason: 'Invalid response from RTL-SDR container' });
+        }
+      });
+    },
+    onError: () => res.json({ available: false, reason: 'RTL-SDR container unreachable' }),
+  });
+});
+
+router.get('/api/audio/stream', (req, res) => {
+  const base = getRtlStreamUrl();
+  if (!base) {
+    return res.status(503).json({ error: 'Audio stream not configured' });
+  }
+  const url = new URL('/stream', base);
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    try { proxyReq.destroy(); } catch {}
+  };
+  const proxyReq = http.get({ hostname: url.hostname, port: url.port || 80, path: '/stream', timeout: 0 }, (proxyRes) => {
+    res.writeHead(200, {
+      'Content-Type':      'audio/mpeg',
+      'Cache-Control':     'no-cache, no-store',
+      'Connection':        'keep-alive',
+      'Transfer-Encoding': 'chunked',
+      'X-Content-Type-Options': 'nosniff',
+    });
+    proxyRes.pipe(res, { end: true });
+    proxyRes.on('error', cleanup);
+  });
+  proxyReq.on('error', (err) => {
+    if (!res.headersSent) res.status(503).json({ error: 'Audio stream unavailable' });
+    else cleanup();
+  });
+  // Clean up when the browser disconnects (both req and res for reliability)
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+});
+
+router.get('/api/audio/settings', (req, res) => {
+  try {
+    const keys = ['rtl_freq', 'rtl_mode', 'rtl_gain', 'rtl_squelch'];
+    const rows = db.prepare(`SELECT key, value FROM settings WHERE key IN (${keys.map(() => '?').join(',')})`).all(...keys);
+    const settings = { freq: '75.5875M', mode: 'fm', gain: '40', squelch: '0' };
+    for (const r of rows) {
+      const k = r.key.replace('rtl_', '');
+      settings[k] = r.value;
+    }
+    res.json(settings);
+  } catch (err) {
+    logError('audio.settings.get', err);
+    res.status(500).json({ error: 'Failed to load audio settings' });
+  }
+});
+
+router.put('/api/audio/settings', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const { freq, mode, gain, squelch } = req.body;
+    const allowed = { freq: freq, mode: mode, gain: gain, squelch: squelch };
+    const upsert = db.prepare("INSERT INTO settings (key, value, updated_at) VALUES (?, ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')");
+    for (const [k, v] of Object.entries(allowed)) {
+      if (v !== undefined) upsert.run('rtl_' + k, String(v), String(v));
+    }
+
+    // Push new settings to RTL-SDR container immediately (if running)
+    const body = JSON.stringify({ freq, mode, gain: parseInt(gain, 10), squelch: parseInt(squelch, 10) });
+    proxyRtlRequest('/control', {
+      method: 'POST',
+      body,
+      onResponse: () => {},
+      onError: () => {},
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    logError('audio.settings.put', err);
+    res.status(500).json({ error: 'Failed to save audio settings' });
+  }
+});
+
+// Admin: trigger auto-squelch measurement
+router.post('/api/audio/auto-squelch', requireAuth, requireAdmin, (req, res) => {
+  if (!getRtlStreamUrl()) return res.status(503).json({ error: 'RTL-SDR not configured' });
+  proxyRtlRequest('/auto-squelch', {
+    method: 'POST',
+    body: '',
+    onResponse: (proxyRes) => {
+      let body = '';
+      proxyRes.on('data', (d) => { body += d; });
+      proxyRes.on('end', () => {
+        try {
+          const result = JSON.parse(body);
+          if (result.ok) {
+            // Persist the new squelch value
+            db.prepare("INSERT INTO settings (key, value, updated_at) VALUES ('rtl_squelch', ?, datetime('now')) ON CONFLICT(key) DO UPDATE SET value = ?, updated_at = datetime('now')").run(String(result.squelch), String(result.squelch));
+          }
+          res.status(proxyRes.statusCode).json(result);
+        } catch {
+          res.status(500).json({ error: 'Invalid response from RTL-SDR container' });
+        }
+      });
+    },
+    onError: (err) => {
+      logError('audio.auto-squelch', err);
+      res.status(503).json({ error: 'RTL-SDR container unreachable' });
+    },
+  });
+});
+
+// ─── Groups ───
+
+router.get('/api/groups', requireAuth, (req, res) => {
+  const groups = db.prepare(`
+    SELECT g.*,
+      COUNT(DISTINCT gm.id) as member_count,
+      COUNT(DISTINCT gk.id) as keyword_count
+    FROM groups_ g
+    LEFT JOIN group_members gm ON g.id = gm.group_id
+    LEFT JOIN group_keywords gk ON g.id = gk.group_id
+    GROUP BY g.id
+    ORDER BY g.name
+  `).all();
+  res.json(groups);
+});
+
+router.get('/api/groups/:id', requireAuth, (req, res) => {
+  const group = db.prepare('SELECT * FROM groups_ WHERE id = ?').get(parseInt(req.params.id, 10));
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+  const members = db.prepare('SELECT * FROM group_members WHERE group_id = ?').all(group.id);
+  const keywords = db.prepare('SELECT * FROM group_keywords WHERE group_id = ?').all(group.id);
+  res.json({ ...group, members, keywords });
+});
+
+router.post('/api/groups', requireAuth, requireAdmin, (req, res) => {
+  const { name, description, colour, capcodes, keywords } = req.body;
+  if (!name) return res.status(400).json({ error: 'Group name required' });
+  try {
+    const result = db.prepare('INSERT INTO groups_ (name, description, colour, created_by) VALUES (?, ?, ?, ?)').run(
+      name, description || '', colour || '#3b82f6', req.user.id
+    );
+    const groupId = result.lastInsertRowid;
+    if (capcodes && Array.isArray(capcodes)) {
+      const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
+      for (const cap of capcodes) {
+        insert.run(groupId, parser.normalizeCapcode(cap));
+      }
+    }
+    if (keywords && Array.isArray(keywords)) {
+      const insertKw = db.prepare('INSERT OR IGNORE INTO group_keywords (group_id, keyword) VALUES (?, ?)');
+      for (const kw of keywords) {
+        if (kw.trim()) insertKw.run(groupId, kw.trim());
+      }
+    }
+    res.json({ id: groupId, name, description, colour });
+  } catch (err) {
+    if (err.message && err.message.includes('UNIQUE')) {
+      return res.status(409).json({ error: 'Group name already exists' });
+    }
+    res.status(500).json({ error: 'Failed to create group' });
+  }
+});
+
+router.put('/api/groups/:id', requireAuth, requireAdmin, (req, res) => {
+  const groupId = parseInt(req.params.id, 10);
+  const { name, description, colour, capcodes, keywords } = req.body;
+  db.prepare('UPDATE groups_ SET name = COALESCE(?, name), description = COALESCE(?, description), colour = COALESCE(?, colour) WHERE id = ?').run(
+    name || null, description !== undefined ? description : null, colour || null, groupId
+  );
+  if (capcodes && Array.isArray(capcodes)) {
+    db.prepare('DELETE FROM group_members WHERE group_id = ?').run(groupId);
+    const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
+    for (const cap of capcodes) {
+      insert.run(groupId, parser.normalizeCapcode(cap));
+    }
+  }
+  if (keywords && Array.isArray(keywords)) {
+    db.prepare('DELETE FROM group_keywords WHERE group_id = ?').run(groupId);
+    const insertKw = db.prepare('INSERT OR IGNORE INTO group_keywords (group_id, keyword) VALUES (?, ?)');
+    for (const kw of keywords) {
+      if (kw.trim()) insertKw.run(groupId, kw.trim());
+    }
+  }
+  res.json({ ok: true });
+});
+
+router.delete('/api/groups/:id', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM groups_ WHERE id = ?').run(parseInt(req.params.id, 10));
+  res.json({ ok: true });
+});
+
+// ─── Capcode aliases ───
+
+router.get('/api/aliases', requireAuth, (req, res) => {
+  const aliases = db.prepare('SELECT * FROM capcode_aliases ORDER BY capcode').all();
+  // Attach group memberships for each alias
+  const groupStmt = db.prepare('SELECT gm.group_id, g.name FROM group_members gm JOIN groups_ g ON gm.group_id = g.id WHERE gm.capcode = ?');
+  for (const a of aliases) {
+    a.groups = groupStmt.all(a.capcode);
+  }
+  res.json(aliases);
+});
+
+router.post('/api/aliases', requireAuth, requireAdmin, (req, res) => {
+  const { capcode, alias, colour, icon, call_type, location, notes, group_ids, hidden } = req.body;
+  if (!capcode || !alias) return res.status(400).json({ error: 'Capcode and alias required' });
+  const normCapcode = parser.normalizeCapcode(capcode);
+  const hiddenVal = hidden ? 1 : 0;
+  try {
+    db.prepare(
+      'INSERT INTO capcode_aliases (capcode, alias, colour, icon, call_type, location, notes, hidden) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(capcode) DO UPDATE SET alias=?, colour=?, icon=?, call_type=?, location=?, notes=?, hidden=?'
+    ).run(normCapcode, alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null, hiddenVal,
+      alias, colour || '#6b7280', icon || 'radio', call_type || null, location || null, notes || null, hiddenVal);
+
+    // Update group memberships if provided
+    if (Array.isArray(group_ids)) {
+      // Remove capcode from all groups first
+      db.prepare('DELETE FROM group_members WHERE capcode = ?').run(normCapcode);
+      // Add to specified groups
+      const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
+      for (const gid of group_ids) {
+        insert.run(parseInt(gid, 10), normCapcode);
+      }
+    }
+
+    // Backfill call_type and location on past messages matching this capcode
+    if (call_type || location) {
+      try {
+        const backfillSql = [];
+        const backfillParams = [];
+        if (call_type) {
+          backfillSql.push('call_type = COALESCE(call_type, ?)');
+          backfillParams.push(call_type);
+        }
+        if (location) {
+          backfillSql.push('location = COALESCE(location, ?)');
+          backfillParams.push(location);
+        }
+        if (backfillSql.length > 0) {
+          // Match both raw capcode and normalized (FLEX leading zeros)
+          db.prepare(
+            `UPDATE messages SET ${backfillSql.join(', ')} WHERE (capcode = ? OR LTRIM(capcode, '0') = ?)`
+          ).run(...backfillParams, normCapcode, normCapcode);
+        }
+      } catch (err) {
+        logError('alias.backfill', err, { capcode: normCapcode });
+      }
+    }
+
+    // Broadcast alias update so all connected clients refresh
+    broadcast({ type: 'alias_updated', data: { capcode: normCapcode } });
+
+    res.json({ ok: true });
+  } catch (err) {
+    logError('alias.save', err, { capcode: req.body.capcode });
+    res.status(500).json({ error: 'Failed to save alias' });
+  }
+});
+
+router.delete('/api/aliases/:capcode', requireAuth, requireAdmin, (req, res) => {
+  db.prepare('DELETE FROM capcode_aliases WHERE capcode = ?').run(parser.normalizeCapcode(req.params.capcode));
+  res.json({ ok: true });
+});
+
+// ─── User favourites ───
+
+router.get('/api/favourites', requireAuth, (req, res) => {
+  const favs = db.prepare(`
+    SELECT uf.*, g.name as group_name, g.colour as group_colour
+    FROM user_favourites uf
+    JOIN groups_ g ON uf.group_id = g.id
+    WHERE uf.user_id = ?
+  `).all(req.user.id);
+  res.json(favs);
+});
+
+router.post('/api/favourites/:groupId', requireAuth, (req, res) => {
+  const groupId = parseInt(req.params.groupId, 10);
+  const notify = req.body.notify !== undefined ? (req.body.notify ? 1 : 0) : 1;
+  try {
+    db.prepare('INSERT OR REPLACE INTO user_favourites (user_id, group_id, notify) VALUES (?, ?, ?)').run(
+      req.user.id, groupId, notify
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to add favourite' });
+  }
+});
+
+router.put('/api/favourites/:groupId/notify', requireAuth, (req, res) => {
+  const groupId = parseInt(req.params.groupId, 10);
+  const notify = req.body.notify ? 1 : 0;
+  db.prepare('UPDATE user_favourites SET notify = ? WHERE user_id = ? AND group_id = ?').run(
+    notify, req.user.id, groupId
+  );
+  res.json({ ok: true });
+});
+
+router.delete('/api/favourites/:groupId', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM user_favourites WHERE user_id = ? AND group_id = ?').run(
+    req.user.id, parseInt(req.params.groupId, 10)
+  );
+  res.json({ ok: true });
+});
+
+// ─── User saved filters ───
+
+router.get('/api/filters', requireAuth, (req, res) => {
+  const filters = db.prepare('SELECT * FROM user_filters WHERE user_id = ? ORDER BY name').all(req.user.id);
+  res.json(filters.map((f) => ({ ...f, filter: JSON.parse(f.filter_json) })));
+});
+
+router.post('/api/filters', requireAuth, (req, res) => {
+  const { name, filter } = req.body;
+  if (!name || !filter) return res.status(400).json({ error: 'Name and filter required' });
+  const result = db.prepare('INSERT INTO user_filters (user_id, name, filter_json) VALUES (?, ?, ?)').run(
+    req.user.id, name, JSON.stringify(filter)
+  );
+  res.json({ id: result.lastInsertRowid, name, filter });
+});
+
+router.delete('/api/filters/:id', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM user_filters WHERE id = ? AND user_id = ?').run(
+    parseInt(req.params.id, 10), req.user.id
+  );
+  res.json({ ok: true });
+});
+
+// ─── Push subscriptions ───
+
+router.post('/api/push/subscribe', requireAuth, (req, res) => {
+  const { subscription } = req.body;
+  if (!subscription || !subscription.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
+  try {
+    db.prepare(
+      'INSERT OR REPLACE INTO push_subscriptions (user_id, endpoint, keys_json) VALUES (?, ?, ?)'
+    ).run(req.user.id, subscription.endpoint, JSON.stringify(subscription.keys));
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to save subscription' });
+  }
+});
+
+router.delete('/api/push/subscribe', requireAuth, (req, res) => {
+  const { endpoint } = req.body;
+  if (endpoint) {
+    db.prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND endpoint = ?').run(req.user.id, endpoint);
+  } else {
+    db.prepare('DELETE FROM push_subscriptions WHERE user_id = ?').run(req.user.id);
+  }
+  res.json({ ok: true });
+});
+
+router.get('/api/push/vapid-key', (req, res) => {
+  res.json({ publicKey: config.VAPID_PUBLIC_KEY });
+});
+
+// Test push notification (sends to current user)
+router.post('/api/push/test', requireAuth, (req, res) => {
+  if (!config.VAPID_PUBLIC_KEY || !config.VAPID_PRIVATE_KEY) {
+    return res.status(400).json({ error: 'VAPID keys not configured. Push notifications are disabled.' });
+  }
+  try {
+    webpush.setVapidDetails(config.VAPID_EMAIL, config.VAPID_PUBLIC_KEY, config.VAPID_PRIVATE_KEY);
+  } catch (err) {
+    return res.status(500).json({ error: 'VAPID configuration error: ' + err.message });
+  }
+  const subs = db.prepare('SELECT endpoint, keys_json FROM push_subscriptions WHERE user_id = ?').all(req.user.id);
+  if (subs.length === 0) {
+    return res.status(400).json({ error: 'No push subscriptions found. Click the bell icon to enable notifications first.' });
+  }
+  const payload = JSON.stringify({
+    title: 'PDW Monitor - Test',
+    body: 'Push notifications are working! You will receive alerts when the app is closed.',
+    data: { test: true },
+  });
+  let sent = 0;
+  let failed = 0;
+  const errors = [];
+  Promise.allSettled(subs.map(sub => {
+    let subscription;
+    try {
+      subscription = { endpoint: sub.endpoint, keys: JSON.parse(sub.keys_json) };
+    } catch (parseErr) {
+      failed++;
+      errors.push('Invalid subscription data');
+      db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+      return Promise.resolve();
+    }
+    return webpush.sendNotification(subscription, payload)
+      .then(() => { sent++; })
+      .catch((err) => {
+        failed++;
+        errors.push(err.statusCode || err.message);
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+        }
+      });
+  })).then(() => {
+    res.json({ sent, failed, errors, total_subscriptions: subs.length });
+  }).catch((err) => {
+    logError('push.test', err);
+    res.status(500).json({ error: 'Push test failed: ' + err.message });
+  });
+});
+
+// ─── Alarm level alerts ───
+
+router.get('/api/alarm-level-alert', requireAuth, (req, res) => {
+  const user = db.prepare('SELECT min_alarm_level FROM users WHERE id = ?').get(req.user.id);
+  const groups = db.prepare('SELECT group_id FROM alarm_level_groups WHERE user_id = ?').all(req.user.id);
+  res.json({
+    min_alarm_level: user ? user.min_alarm_level : null,
+    group_ids: groups.map(g => g.group_id),
+  });
+});
+
+router.put('/api/alarm-level-alert', requireAuth, (req, res) => {
+  const { min_alarm_level, group_ids } = req.body;
+  const level = min_alarm_level ? parseInt(min_alarm_level, 10) : null;
+  if (level !== null && (level < 2 || level > 5)) {
+    return res.status(400).json({ error: 'Alarm level must be between 2 and 5' });
+  }
+  db.prepare('UPDATE users SET min_alarm_level = ? WHERE id = ?').run(level, req.user.id);
+
+  // Update alarm level group scoping
+  if (Array.isArray(group_ids)) {
+    db.prepare('DELETE FROM alarm_level_groups WHERE user_id = ?').run(req.user.id);
+    if (group_ids.length > 0) {
+      const insert = db.prepare('INSERT OR IGNORE INTO alarm_level_groups (user_id, group_id) VALUES (?, ?)');
+      for (const gid of group_ids) {
+        insert.run(req.user.id, parseInt(gid, 10));
+      }
+    }
+  }
+
+  res.json({ ok: true, min_alarm_level: level });
+});
+
+// ─── User preferences (default view) ───
+
+router.get('/api/preferences', requireAuth, (req, res) => {
+  const prefs = db.prepare('SELECT * FROM user_preferences WHERE user_id = ?').get(req.user.id);
+  res.json(prefs || { default_view: 'live', default_group_id: null, default_keyword: null, default_region: null });
+});
+
+router.put('/api/preferences', requireAuth, (req, res) => {
+  const { default_view, default_group_id, default_keyword, default_region } = req.body;
+  db.prepare(`
+    INSERT INTO user_preferences (user_id, default_view, default_group_id, default_keyword, default_region, updated_at)
+    VALUES (?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(user_id) DO UPDATE SET
+      default_view = excluded.default_view,
+      default_group_id = excluded.default_group_id,
+      default_keyword = excluded.default_keyword,
+      default_region = excluded.default_region,
+      updated_at = datetime('now')
+  `).run(req.user.id, default_view || 'live', default_group_id || null, default_keyword || null, default_region || null);
+  res.json({ ok: true });
+});
+
+// ─── Notification log ───
+
+router.get('/api/notification-log', requireAuth, (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 50, 200);
+  const logs = db.prepare(
+    'SELECT * FROM notification_log WHERE user_id = ? ORDER BY created_at DESC LIMIT ?'
+  ).all(req.user.id, limit);
+  res.json(logs);
+});
+
+router.delete('/api/notification-log', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM notification_log WHERE user_id = ?').run(req.user.id);
+  res.json({ ok: true });
+});
+
+// ─── Silenced capcodes ───
+
+router.get('/api/silenced-capcodes', requireAuth, (req, res) => {
+  const silenced = db.prepare('SELECT * FROM silenced_capcodes WHERE user_id = ? ORDER BY capcode').all(req.user.id);
+  res.json(silenced);
+});
+
+router.post('/api/silenced-capcodes', requireAuth, (req, res) => {
+  const { capcode } = req.body;
+  if (!capcode) return res.status(400).json({ error: 'Capcode required' });
+  const normCap = parser.normalizeCapcode(capcode);
+  try {
+    db.prepare('INSERT OR IGNORE INTO silenced_capcodes (user_id, capcode) VALUES (?, ?)').run(req.user.id, normCap);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to silence capcode' });
+  }
+});
+
+router.delete('/api/silenced-capcodes/:capcode', requireAuth, (req, res) => {
+  const normCap = parser.normalizeCapcode(req.params.capcode);
+  db.prepare('DELETE FROM silenced_capcodes WHERE user_id = ? AND capcode = ?').run(req.user.id, normCap);
+  res.json({ ok: true });
+});
+
+// ─── FLEX fragment filtering and incident dedup ───
+// FLEX group pages send the same message to multiple capcodes simultaneously.
+// multimon-ng outputs each capcode's portion separately, often with truncated
+// content and "(Part X of Y)" frame markers. Fragments arrive over 30-60 seconds.
+
+const FLEX_MIN_CONTENT_LENGTH = 20; // Drop FLEX fragments shorter than this
+
+/**
+ * Check if a FLEX message is a tiny junk fragment that should be dropped.
+ */
+function isJunkFlexFragment(msg) {
+  if (msg.protocol !== 'FLEX') return false;
+  return (msg.content || '').length < FLEX_MIN_CONTENT_LENGTH;
+}
+
+// ─── FLEX/1600 capcode buffer ───
+// Hold FLEX/1600 messages by capcode for 2 seconds to catch Part 2 frames.
+// If Part 2 arrives for the same capcode within 2s, merge or keep the longer version.
+const flexCapcodeBuffer = new Map();
+const FLEX_CAPCODE_BUFFER_MS = 2000; // 2 second hold
+
+function bufferFlexByCapcode(msg) {
+  if (msg.protocol !== 'FLEX' || msg.bitrate !== 1600) return null;
+
+  const key = msg.capcode;
+  let entry = flexCapcodeBuffer.get(key);
+
+  if (!entry) {
+    // First part for this capcode - hold for 2 seconds
+    entry = { msg: { ...msg }, timer: null };
+    flexCapcodeBuffer.set(key, entry);
+    entry.timer = setTimeout(() => {
+      flexCapcodeBuffer.delete(key);
+      processAfterFlexBuffer(entry.msg);
+    }, FLEX_CAPCODE_BUFFER_MS);
+    return { buffered: true };
+  }
+
+  // Second (or subsequent) part arrived for same capcode within 2s
+  clearTimeout(entry.timer);
+
+  const existingContent = (entry.msg.content || '').trim();
+  const newContent = (msg.content || '').trim();
+
+  // Check if contents overlap (one starts like the other = resend, keep longer)
+  const checkLen = Math.min(20, existingContent.length, newContent.length);
+  if (checkLen > 0 &&
+      newContent.substring(0, checkLen) === existingContent.substring(0, checkLen)) {
+    // Overlapping content - keep the longer version
+    if (newContent.length > existingContent.length) {
+      entry.msg = { ...entry.msg, content: newContent };
+    }
+  } else if (newContent.length >= FLEX_MIN_CONTENT_LENGTH) {
+    // Different content - concatenate (true Part 1 + Part 2)
+    entry.msg.content = existingContent + ' ' + newContent;
+  }
+
+  // Release merged message
+  flexCapcodeBuffer.delete(key);
+  processAfterFlexBuffer(entry.msg);
+  return { buffered: true };
+}
+
+/**
+ * Process a FLEX message after it exits the capcode buffer.
+ * Re-cleans content, runs incident dedup, then inserts.
+ */
+function processAfterFlexBuffer(msg) {
+  // Re-clean content in case joining created artifacts
+  msg.content = parser.cleanContent(msg.content);
+
+  // Drop if now too short after cleaning
+  if (isJunkFlexFragment(msg)) return;
+
+  // FLEX incident dedup
+  const incResult = bufferByIncident(msg);
+  if (incResult) return;
+
+  // Direct insert (content dedup check happens inside insertAndBroadcast)
+  insertAndBroadcast(msg);
+}
+
+// Incident-based dedup buffer: collects FLEX messages with the same F-number
+// arriving within a short window, then inserts the longest version per capcode.
+const incidentBuffer = new Map();
+const INCIDENT_BUFFER_MS = 15000; // 15 second window for the initial burst
+
+function bufferByIncident(msg) {
+  // Only buffer FLEX messages with an incident number
+  if (msg.protocol !== 'FLEX') return null;
+  const incidentNum = parser.extractIncidentNumber(msg.content);
+  if (!incidentNum) return null;
+
+  // DB-level dedup: if we already inserted a longer message with this F-number
+  // AND same capcode within the last 2 minutes, skip this shorter fragment
+  const existing = db.prepare(
+    "SELECT LENGTH(content) as len FROM messages WHERE capcode = ? AND content LIKE ? AND received_at > datetime('now', '-120 seconds') ORDER BY LENGTH(content) DESC LIMIT 1"
+  ).get(msg.capcode, `%${incidentNum}%`);
+  if (existing && existing.len >= (msg.content || '').length) {
+    return { buffered: true }; // Already have a better version in DB for this capcode
+  }
+
+  // Smart dedup: if this message has no trucks and a longer message with the
+  // same F-number (any capcode) already exists that contains this content, drop it
+  const trucks = parser.extractTrucks(msg.content);
+  if (!trucks) {
+    const longerExisting = db.prepare(
+      "SELECT content FROM messages WHERE content LIKE ? AND LENGTH(content) > ? AND received_at > datetime('now', '-120 seconds') LIMIT 1"
+    ).get(`%${incidentNum}%`, (msg.content || '').length);
+    if (longerExisting && longerExisting.content.includes((msg.content || '').trim())) {
+      return { buffered: true }; // Partial/summary already covered by a fuller message
+    }
+  }
+
+  let entry = incidentBuffer.get(incidentNum);
+  if (!entry) {
+    entry = { capcodes: new Map(), timer: null };
+    incidentBuffer.set(incidentNum, entry);
+  }
+
+  // Track messages per capcode within this incident
+  if (!entry.capcodes.has(msg.capcode)) {
+    entry.capcodes.set(msg.capcode, []);
+  }
+  entry.capcodes.get(msg.capcode).push({ ...msg });
+
+  // Reset the timer each time a new fragment arrives
+  if (entry.timer) clearTimeout(entry.timer);
+  entry.timer = setTimeout(() => {
+    incidentBuffer.delete(incidentNum);
+    // For each unique capcode, pick the longest message
+    const candidates = [];
+    for (const [capcode, messages] of entry.capcodes) {
+      const best = messages.reduce((a, b) =>
+        (b.content || '').length > (a.content || '').length ? b : a
+      );
+      best.is_multipart = true;
+      best.multipart_id = incidentNum;
+      candidates.push(best);
+    }
+
+    // Smart dedup: drop partial/summary messages whose content is a subset
+    // of a longer message in the same incident and that have no trucks.
+    // This removes alert-only capcodes that echo a shorter version of the
+    // full dispatch (e.g. national alert capcode with no truck info).
+    const toInsert = candidates.filter(msg => {
+      const content = (msg.content || '').trim();
+      const trucks = parser.extractTrucks(content);
+      // If this message has trucks, always keep it
+      if (trucks) return true;
+      // Check if a longer candidate contains this message's content
+      const isSubset = candidates.some(other => {
+        if (other === msg) return false;
+        const otherContent = (other.content || '').trim();
+        return otherContent.length > content.length && otherContent.includes(content);
+      });
+      // Drop if it's a subset of another message and has no trucks
+      return !isSubset;
+    });
+
+    for (const msg of toInsert) {
+      insertAndBroadcast(msg);
+    }
+  }, INCIDENT_BUFFER_MS);
+
+  return { buffered: true };
+}
+
+// ─── Ingestion endpoint (called by client script) ───
+
+/**
+ * Insert a fully-assembled message into DB, broadcast, and send push notifications.
+ * Returns the inserted message row or null.
+ */
+function insertAndBroadcast(msg) {
+  // Content prefix dedup: for FLEX messages, check if a longer/equal message
+  // with the same content prefix AND same capcode already exists
+  const content = (msg.content || '').trim();
+  if (content.length >= 25 && msg.protocol === 'FLEX') {
+    const prefix = content.substring(0, 25).replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const existingByContent = db.prepare(
+      "SELECT LENGTH(content) as len FROM messages WHERE capcode = ? AND content LIKE ? ESCAPE '\\' AND received_at > datetime('now', '-120 seconds') ORDER BY LENGTH(content) DESC LIMIT 1"
+    ).get(msg.capcode, prefix + '%');
+    if (existingByContent && existingByContent.len >= content.length) {
+      return null; // Already have a better or equal version in DB for this capcode
+    }
+  }
+
+  // Enrich
+  const callType = msg.call_type || parser.detectCallType(msg.content);
+  const location = msg.location || parser.extractLocation(msg.content);
+  const trucks = msg.trucks || parser.extractTrucks(msg.content);
+  const hash = parser.dedupeHash(msg.capcode, msg.content);
+
+  // Dedup check
+  if (parser.isDuplicate(db, hash)) return null;
+
+  // Check capcode alias for overrides (normalize to handle FLEX leading zeros)
+  const normCapcode = parser.normalizeCapcode(msg.capcode);
+  const alias = db.prepare('SELECT * FROM capcode_aliases WHERE capcode = ?').get(normCapcode);
+
+  const finalCallType = callType || (alias && alias.call_type) || null;
+  const finalLocation = location || (alias && alias.location) || null;
+
+  const result = db.prepare(`
+    INSERT INTO messages (capcode, content, protocol, bitrate, function_code, source, call_type, location, trucks, is_multipart, multipart_id, raw, hash, received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+  `).run(
+    msg.capcode,
+    msg.content || '',
+    msg.protocol || 'POCSAG',
+    msg.bitrate || null,
+    msg.function_code || 0,
+    msg.source || 'client',
+    finalCallType,
+    finalLocation,
+    trucks,
+    msg.is_multipart ? 1 : 0,
+    msg.multipart_id || null,
+    msg.raw || null,
+    hash
+  );
+
+  const insertedMsg = db.prepare('SELECT * FROM messages WHERE id = ?').get(result.lastInsertRowid);
+
+  // Add alias info for broadcast
+  if (alias) {
+    insertedMsg.alias = alias.alias;
+    insertedMsg.alias_colour = alias.colour;
+    insertedMsg.alias_icon = alias.icon;
+    insertedMsg.alias_notes = alias.notes;
+    if (alias.hidden) insertedMsg.hidden = true;
+  }
+
+  // Add incident number if present
+  const incidentNum = parser.extractIncidentNumber(msg.content);
+  if (incidentNum) {
+    insertedMsg.incident_number = incidentNum;
+  }
+
+  // Add priority colour if present (ambo/fire pages)
+  const priority = parser.extractPriority(msg.content);
+  if (priority) {
+    insertedMsg.priority = priority;
+  }
+
+  // Add alarm level if present (multi-alarm fires)
+  const alarmLevel = parser.extractAlarmLevel(msg.content);
+  if (alarmLevel) {
+    insertedMsg.alarm_level = alarmLevel;
+  }
+
+  // Broadcast via WebSocket
+  broadcast({ type: 'message', data: insertedMsg });
+
+  // Send push notifications for matching groups
+  sendPushForMessage(insertedMsg);
+
+  return insertedMsg;
+}
+
+router.post('/api/ingest', requireApiKey, (req, res) => {
+  try {
+    const messages = Array.isArray(req.body) ? req.body : [req.body];
+    const inserted = [];
+
+    for (const msg of messages) {
+      if (!msg.capcode) continue;
+
+      // Clean control character tags from content
+      msg.content = parser.cleanContent(msg.content);
+
+      // Check for multipart messages (e.g. "1/3", "PART 1 of 3")
+      const mpResult = parser.handleMultipart(msg.capcode, msg.content, (capcode, joinedContent, isPartial) => {
+        // Timeout callback: flush partial multipart message
+        const partialMsg = { ...msg, content: joinedContent, is_multipart: true, multipart_id: capcode };
+        insertAndBroadcast(partialMsg);
+      });
+
+      if (mpResult) {
+        if (!mpResult.isComplete) {
+          // Still waiting for more parts - don't insert yet
+          continue;
+        }
+        // All parts received - insert the joined message
+        msg.content = mpResult.joined;
+        msg.is_multipart = true;
+        msg.multipart_id = msg.capcode;
+      }
+
+      // Drop tiny FLEX junk fragments (broken frame remnants)
+      if (isJunkFlexFragment(msg)) {
+        continue;
+      }
+
+      // FLEX/1600 capcode buffer: hold 2s to catch Part 2 for same capcode
+      const flexResult = bufferFlexByCapcode(msg);
+      if (flexResult) {
+        continue;
+      }
+
+      // FLEX incident dedup: buffer FLEX messages with same F-number, keep longest
+      const incResult = bufferByIncident(msg);
+      if (incResult) {
+        // Message buffered or already have better version in DB
+        continue;
+      }
+
+      const insertedMsg = insertAndBroadcast(msg);
+      if (insertedMsg) inserted.push(insertedMsg);
+    }
+
+    res.json({ inserted: inserted.length });
+  } catch (err) {
+    console.error('Ingest error:', err);
+    logError('ingest', err);
+    res.status(500).json({ error: 'Ingestion failed' });
+  }
+});
+
+// ─── Client silence alert (called by pdw-client when no pages received) ───
+// Receives silence alert from client, broadcasts to all connected admin users via WebSocket
+
+router.post('/api/client/silence-alert', requireApiKey, (req, res) => {
+  try {
+    const { minutes, source } = req.body || {};
+    const mins = minutes || 0;
+    const msg = `Client ${source || 'unknown'} has not received any pager messages for ${mins} minutes. Check RTL-SDR connection, antenna, and frequency.`;
+
+    console.log(`[SILENCE-ALERT] ${msg}`);
+
+    // Log to error log for admin visibility
+    logWarn('client.silence-alert', msg, { minutes: mins, source });
+
+    // Broadcast to all connected clients (admins will see it in the UI)
+    broadcast({
+      type: 'silence-alert',
+      data: { minutes: mins, source: source || 'unknown', message: msg },
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    logError('silence-alert', err);
+    res.status(500).json({ error: 'Failed to process silence alert' });
+  }
+});
+
+// ─── Keyword alerts ───
+
+router.get('/api/keyword-alerts', requireAuth, (req, res) => {
+  const alerts = db.prepare(`
+    SELECT ka.*, g.name as group_name, g.colour as group_colour
+    FROM keyword_alerts ka
+    LEFT JOIN groups_ g ON ka.group_id = g.id
+    WHERE ka.user_id = ?
+    ORDER BY ka.keyword
+  `).all(req.user.id);
+  res.json(alerts);
+});
+
+router.post('/api/keyword-alerts', requireAuth, (req, res) => {
+  const { keyword, group_id } = req.body;
+  if (!keyword || !keyword.trim()) return res.status(400).json({ error: 'Keyword required' });
+  const groupId = group_id ? parseInt(group_id, 10) : null;
+  try {
+    const result = db.prepare('INSERT INTO keyword_alerts (user_id, keyword, group_id) VALUES (?, ?, ?)').run(
+      req.user.id, keyword.trim(), groupId
+    );
+    res.json({ id: result.lastInsertRowid, keyword: keyword.trim(), group_id: groupId });
+  } catch (err) {
+    if (err.message && err.message.includes('UNIQUE')) {
+      return res.status(409).json({ error: 'Keyword already exists' });
+    }
+    res.status(500).json({ error: 'Failed to add keyword alert' });
+  }
+});
+
+router.put('/api/keyword-alerts/:id/notify', requireAuth, (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  const notify = req.body.notify ? 1 : 0;
+  db.prepare('UPDATE keyword_alerts SET notify = ? WHERE id = ? AND user_id = ?').run(
+    notify, id, req.user.id
+  );
+  res.json({ ok: true });
+});
+
+router.delete('/api/keyword-alerts/:id', requireAuth, (req, res) => {
+  db.prepare('DELETE FROM keyword_alerts WHERE id = ? AND user_id = ?').run(
+    parseInt(req.params.id, 10), req.user.id
+  );
+  res.json({ ok: true });
+});
+
+/**
+ * Send push notifications to users who have favourited groups containing this capcode,
+ * and to users with keyword alerts matching the message content.
+ * Respects per-user silenced capcodes and logs all sent notifications.
+ */
+function sendPushForMessage(msg) {
+  if (!config.VAPID_PUBLIC_KEY || !config.VAPID_PRIVATE_KEY) return;
+
+  try {
+    webpush.setVapidDetails(config.VAPID_EMAIL, config.VAPID_PUBLIC_KEY, config.VAPID_PRIVATE_KEY);
+  } catch {
+    return;
+  }
+
+  const normCapcode = parser.normalizeCapcode(msg.capcode);
+
+  // Check if this capcode is hidden - skip push notifications for hidden capcodes
+  const hiddenAlias = db.prepare('SELECT 1 FROM capcode_aliases WHERE capcode = ? AND hidden = 1').get(normCapcode);
+  if (hiddenAlias) return;
+
+  // Build set of user IDs who have silenced this capcode
+  const silencedUsers = new Set(
+    db.prepare('SELECT user_id FROM silenced_capcodes WHERE capcode = ?').all(normCapcode).map(r => r.user_id)
+  );
+
+  const logNotification = db.prepare(
+    'INSERT INTO notification_log (user_id, message_id, capcode, title, body, match_type, match_detail) VALUES (?, ?, ?, ?, ?, ?, ?)'
+  );
+
+  // Find groups this capcode belongs to (by capcode OR keyword match)
+  const capcodeGroups = db.prepare(
+    "SELECT g.id, g.name FROM groups_ g JOIN group_members gm ON g.id = gm.group_id WHERE LTRIM(gm.capcode, '0') = ?"
+  ).all(normCapcode);
+
+  const content = (msg.content || '').toLowerCase();
+  const keywordGroups = content ? db.prepare(
+    "SELECT DISTINCT g.id, g.name FROM groups_ g JOIN group_keywords gk ON g.id = gk.group_id WHERE LOWER(?) LIKE '%' || LOWER(gk.keyword) || '%'"
+  ).all(content) : [];
+
+  // Merge and deduplicate groups
+  const groupMap = new Map();
+  for (const g of [...capcodeGroups, ...keywordGroups]) groupMap.set(g.id, g);
+  const groups = Array.from(groupMap.values());
+
+  // ─── Group-based notifications ───
+  if (groups.length > 0) {
+    const groupIds = groups.map((g) => g.id);
+    const placeholders = groupIds.map(() => '?').join(',');
+    // Get per-user subscriptions (need user_id for silenced check + logging)
+    const userSubs = db.prepare(`
+      SELECT DISTINCT ps.user_id, ps.endpoint, ps.keys_json
+      FROM push_subscriptions ps
+      JOIN user_favourites uf ON ps.user_id = uf.user_id
+      WHERE uf.group_id IN (${placeholders}) AND uf.notify = 1
+    `).all(...groupIds);
+
+    const groupNames = groups.map((g) => g.name).join(', ');
+    const title = `PDW: ${msg.call_type || 'Page'} - ${groupNames}`;
+    const body = msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`;
+    const payload = JSON.stringify({
+      title,
+      body,
+      data: { messageId: msg.id, capcode: msg.capcode },
+    });
+
+    // Group subs by user, filter silenced
+    const perUser = new Map();
+    for (const s of userSubs) {
+      if (silencedUsers.has(s.user_id)) continue;
+      if (!perUser.has(s.user_id)) perUser.set(s.user_id, []);
+      perUser.get(s.user_id).push(s);
+    }
+    for (const [userId, subs] of perUser) {
+      sendToSubscriptions(subs, payload);
+      try { logNotification.run(userId, msg.id, normCapcode, title, body, 'group', groupNames); } catch { /* ignore */ }
+    }
+  }
+
+  // ─── Keyword alert notifications ───
+  // (reuse `content` from line above)
+  if (!content) return;
+
+  const keywordAlerts = db.prepare('SELECT DISTINCT ka.user_id, ka.keyword, ka.group_id FROM keyword_alerts ka WHERE ka.notify = 1').all();
+  const matchedUsers = new Map(); // user_id -> matched keywords
+
+  for (const ka of keywordAlerts) {
+    if (!content.includes(ka.keyword.toLowerCase())) continue;
+    // If scoped to a group, check the message belongs to that group
+    if (ka.group_id) {
+      const msgInGroup = groups.some(g => g.id === ka.group_id);
+      if (!msgInGroup) continue;
+    }
+    if (!matchedUsers.has(ka.user_id)) matchedUsers.set(ka.user_id, []);
+    matchedUsers.get(ka.user_id).push(ka.keyword);
+  }
+
+  for (const [userId, keywords] of matchedUsers) {
+    if (silencedUsers.has(userId)) continue;
+    const subs = db.prepare('SELECT endpoint, keys_json FROM push_subscriptions WHERE user_id = ?').all(userId);
+    if (subs.length === 0) continue;
+
+    const title = `PDW Alert: ${keywords.join(', ')}`;
+    const body = msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`;
+    const payload = JSON.stringify({
+      title,
+      body,
+      data: { messageId: msg.id, capcode: msg.capcode, keywordMatch: true },
+    });
+
+    sendToSubscriptions(subs, payload);
+    try { logNotification.run(userId, msg.id, normCapcode, title, body, 'keyword', keywords.join(', ')); } catch { /* ignore */ }
+  }
+
+  // ─── Alarm level notifications ───
+  const alarmLevel = parser.extractAlarmLevel(msg.content);
+  if (alarmLevel) {
+    // Find all users whose min_alarm_level is <= the message's alarm level
+    const alarmUsers = db.prepare(
+      'SELECT DISTINCT u.id FROM users u WHERE u.min_alarm_level IS NOT NULL AND u.min_alarm_level <= ?'
+    ).all(alarmLevel);
+
+    for (const user of alarmUsers) {
+      if (silencedUsers.has(user.id)) continue;
+      // Skip if user already notified via group or keyword
+      const alreadyNotified = matchedUsers.has(user.id) ||
+        (groups.length > 0 && db.prepare(
+          `SELECT 1 FROM user_favourites WHERE user_id = ? AND group_id IN (${groups.map(() => '?').join(',')}) AND notify = 1 LIMIT 1`
+        ).get(user.id, ...groups.map(g => g.id)));
+      if (alreadyNotified) continue;
+
+      // Check alarm level group scoping: if user has specific groups set,
+      // only alert if the message belongs to one of those groups
+      const userAlarmGroups = db.prepare('SELECT group_id FROM alarm_level_groups WHERE user_id = ?').all(user.id);
+      if (userAlarmGroups.length > 0) {
+        const allowedGroupIds = new Set(userAlarmGroups.map(g => g.group_id));
+        const msgInAllowedGroup = groups.some(g => allowedGroupIds.has(g.id));
+        if (!msgInAllowedGroup) continue;
+      }
+
+      const subs = db.prepare('SELECT endpoint, keys_json FROM push_subscriptions WHERE user_id = ?').all(user.id);
+      if (subs.length === 0) continue;
+
+      const ordinal = alarmLevel === 2 ? '2nd' : alarmLevel === 3 ? '3rd' : `${alarmLevel}th`;
+      const title = `PDW: ${ordinal} Alarm!`;
+      const body = msg.content ? msg.content.substring(0, 200) : `Capcode: ${msg.capcode}`;
+      const payload = JSON.stringify({
+        title,
+        body,
+        data: { messageId: msg.id, capcode: msg.capcode, alarmLevel },
+      });
+
+      sendToSubscriptions(subs, payload);
+      try { logNotification.run(user.id, msg.id, normCapcode, title, body, 'alarm', `${ordinal} Alarm`); } catch { /* ignore */ }
+    }
+  }
+}
+
+function sendToSubscriptions(subs, payload) {
+  for (const sub of subs) {
+    try {
+      const subscription = {
+        endpoint: sub.endpoint,
+        keys: JSON.parse(sub.keys_json),
+      };
+      webpush.sendNotification(subscription, payload).catch((err) => {
+        if (err.statusCode === 410 || err.statusCode === 404) {
+          db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+        }
+      });
+    } catch (err) {
+      logError('push.sendToSubscriptions', err, { endpoint: sub.endpoint });
+      // Remove broken subscription
+      db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+    }
+  }
+}
+
+// ─── Admin: Mass capcode import from CSV ───
+// CSV format: Capcode,Alias,Colour,Icon,CallType,Location,Trucks,Notes
+// First line is header. Capcode and Alias are required.
+
+router.post('/api/admin/capcodes/import', requireAuth, requireAdmin, (req, res) => {
+  const { csv, mode } = req.body;
+  if (!csv || typeof csv !== 'string') return res.status(400).json({ error: 'CSV data required' });
+
+  const importMode = mode || 'upsert'; // 'upsert' (default), 'insert', 'skip-existing'
+
+  try {
+    const lines = csv.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) return res.status(400).json({ error: 'CSV must have a header row and at least one data row' });
+
+    // Parse header to detect column positions
+    const headerParts = lines[0].split(/[,;\t]/).map(h => h.trim().toLowerCase());
+    const colIndex = {};
+    headerParts.forEach((h, i) => { colIndex[h] = i; });
+
+    if (colIndex['capcode'] === undefined || colIndex['alias'] === undefined) {
+      return res.status(400).json({ error: 'CSV must have "Capcode" and "Alias" columns. Found columns: ' + headerParts.join(', ') });
+    }
+
+    const upsertStmt = db.prepare(
+      'INSERT INTO capcode_aliases (capcode, alias, colour, icon, call_type, location, notes) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(capcode) DO UPDATE SET alias=excluded.alias, colour=excluded.colour, icon=excluded.icon, call_type=excluded.call_type, location=excluded.location, notes=excluded.notes'
+    );
+    const insertStmt = db.prepare(
+      'INSERT OR IGNORE INTO capcode_aliases (capcode, alias, colour, icon, call_type, location, notes) VALUES (?, ?, ?, ?, ?, ?, ?)'
+    );
+
+    let imported = 0;
+    let skipped = 0;
+    let errors = [];
+    const dbFileCol = colIndex['trucks'] !== undefined ? colIndex['trucks'] : colIndex['truck'] !== undefined ? colIndex['truck'] : null;
+
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].split(/[,;\t]/).map(p => p.trim());
+      if (parts.length < 2) { skipped++; continue; }
+
+      const capcode = parser.normalizeCapcode(parts[colIndex['capcode']]);
+      const alias = parts[colIndex['alias']];
+      if (!capcode || !alias) { skipped++; continue; }
+
+      const colour = parts[colIndex['colour']] || '#6b7280';
+      const icon = parts[colIndex['icon']] || 'radio';
+      const callType = parts[colIndex['calltype']] || parts[colIndex['call_type']] || null;
+      const location = parts[colIndex['location']] || null;
+      const notes = parts[colIndex['notes']] || null;
+
+      try {
+        if (importMode === 'insert') {
+          insertStmt.run(capcode, alias, colour, icon, callType, location, notes);
+        } else {
+          upsertStmt.run(capcode, alias, colour, icon, callType, location, notes);
+        }
+        imported++;
+      } catch (err) {
+        errors.push(`Line ${i + 1}: ${err.message}`);
+        skipped++;
+      }
+    }
+
+    broadcast({ type: 'alias_updated', data: { bulk: true } });
+
+    res.json({ imported, skipped, errors: errors.slice(0, 50) });
+  } catch (err) {
+    logError('capcodes.import', err);
+    res.status(500).json({ error: 'Import failed: ' + err.message });
+  }
+});
+
+// ─── Admin: Mass add capcodes to a group ───
+// Body: { group_id, capcodes: ['1234', '5678', ...] }
+// Or with CSV: { group_id, csv: 'Capcode\n1234\n5678' }
+
+router.post('/api/admin/groups/capcodes/import', requireAuth, requireAdmin, (req, res) => {
+  const { group_id, capcodes, csv } = req.body;
+  const groupId = parseInt(group_id, 10);
+  if (!groupId) return res.status(400).json({ error: 'group_id required' });
+
+  const group = db.prepare('SELECT id FROM groups_ WHERE id = ?').get(groupId);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+
+  let capcodeList = [];
+
+  if (csv) {
+    const lines = csv.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) return res.status(400).json({ error: 'CSV must have a header row and at least one data row' });
+    const headerParts = lines[0].split(/[,;\t]/).map(h => h.trim().toLowerCase());
+    const capcodeCol = headerParts.findIndex(h => h.includes('capcode') || h.includes('cap') || h === 'id' || h === 'address');
+    if (capcodeCol === -1) {
+      // If no header recognised, try first column
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(/[,;\t]/);
+        const cc = parser.normalizeCapcode(parts[0]);
+        if (cc) capcodeList.push(cc);
+      }
+    } else {
+      for (let i = 1; i < lines.length; i++) {
+        const parts = lines[i].split(/[,;\t]/);
+        if (parts[capcodeCol]) {
+          const cc = parser.normalizeCapcode(parts[capcodeCol]);
+          if (cc) capcodeList.push(cc);
+        }
+      }
+    }
+  } else if (capcodes && Array.isArray(capcodes)) {
+    capcodeList = capcodes.map(c => parser.normalizeCapcode(c)).filter(Boolean);
+  }
+
+  if (capcodeList.length === 0) return res.status(400).json({ error: 'No capcodes provided' });
+
+  const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
+  let inserted = 0;
+  for (const cc of capcodeList) {
+    try {
+      insert.run(groupId, cc);
+      inserted++;
+    } catch { skipped++; }
+  }
+
+  res.json({ inserted, total: capcodeList.length });
+});
+
+// ─── Admin: Create a group with capcodes from CSV ───
+// Body: { name, description, colour, csv, mode }
+// CSV format: Capcode,Alias,Colour,Icon,Notes (alias/colour/icon/notes are optional, will create alias if provided)
+
+router.post('/api/admin/groups/create-with-capcodes', requireAuth, requireAdmin, (req, res) => {
+  const { name, description, colour, csv, mode } = req.body;
+  if (!name) return res.status(400).json({ error: 'Group name required' });
+  if (!csv) return res.status(400).json({ error: 'CSV data required' });
+
+  try {
+    // Create the group
+    const result = db.prepare('INSERT INTO groups_ (name, description, colour) VALUES (?, ?, ?)').run(
+      name, description || '', colour || '#3b82f6'
+    );
+    const groupId = result.lastInsertRowid;
+
+    // Parse CSV and add capcodes + aliases
+    const lines = csv.split('\n').map(l => l.trim()).filter(Boolean);
+    if (lines.length < 2) return res.status(400).json({ error: 'CSV must have a header row and at least one data row' });
+
+    const headerParts = lines[0].split(/[,;\t]/).map(h => h.trim().toLowerCase());
+    const colIndex = {};
+    headerParts.forEach((h, i) => { colIndex[h] = i; });
+
+    if (colIndex['capcode'] === undefined) {
+      return res.status(400).json({ error: 'CSV must have a "Capcode" column' });
+    }
+
+    const upsertAlias = db.prepare(
+      'INSERT INTO capcode_aliases (capcode, alias, colour, icon, call_type, location, notes) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(capcode) DO UPDATE SET alias=excluded.alias, colour=excluded.colour, icon=excluded.icon, call_type=excluded.call_type, location=excluded.location, notes=excluded.notes'
+    );
+    const insertGroup = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
+
+    let capcodesAdded = 0;
+    let aliasesCreated = 0;
+
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].split(/[,;\t]/).map(p => p.trim());
+      const capcode = parser.normalizeCapcode(parts[colIndex['capcode']]);
+      if (!capcode) continue;
+
+      // Add to group
+      insertGroup.run(groupId, capcode);
+      capcodesAdded++;
+
+      // Create alias if alias column exists and has a value
+      if (colIndex['alias'] !== undefined && parts[colIndex['alias']]) {
+        const alias = parts[colIndex['alias']];
+        const colourVal = parts[colIndex['colour']] || '#6b7280';
+        const icon = parts[colIndex['icon']] || 'radio';
+        const callType = parts[colIndex['calltype']] || parts[colIndex['call_type']] || null;
+        const location = parts[colIndex['location']] || null;
+        const notes = parts[colIndex['notes']] || null;
+
+        upsertAlias.run(capcode, alias, colourVal, icon, callType, location, notes);
+        aliasesCreated++;
+      }
+    }
+
+    broadcast({ type: 'alias_updated', data: { bulk: true } });
+
+    res.json({ group_id: groupId, capcodes_added: capcodesAdded, aliases_created: aliasesCreated });
+  } catch (err) {
+    logError('groups.create-with-capcodes', err);
+    res.status(500).json({ error: 'Failed: ' + err.message });
+  }
+});
+
+// ─── Admin: Trigger database backup ───
+
+router.post('/api/admin/backup', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const BACKUP_DIR = process.env.BACKUP_DIR || '/data/backups';
+    const fs = require('fs');
+    const TIMESTAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const BACKUP_FILE = path.join(BACKUP_DIR, `pdw-backup-${TIMESTAMP}.db`);
+    const MAX_BACKUPS = parseInt(process.env.MAX_BACKUPS || '30', 10);
+
+    // Ensure backup directory exists and is writable
+    if (!fs.existsSync(BACKUP_DIR)) {
+      fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o755 });
+    }
+
+    // Verify writable
+    const testFile = path.join(BACKUP_DIR, '.write-test');
+    fs.writeFileSync(testFile, 'test');
+    fs.unlinkSync(testFile);
+
+    // better-sqlite3 backup requires a Database object as destination
+    const backupDb = new Database(BACKUP_FILE);
+    try {
+      db.backup(backupDb);
+    } finally {
+      backupDb.close();
+    }
+
+    // Remove old backups beyond MAX_BACKUPS
+    const files = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('pdw-backup-') && f.endsWith('.db'))
+      .sort()
+      .reverse();
+    if (files.length > MAX_BACKUPS) {
+      for (const f of files.slice(MAX_BACKUPS)) {
+        fs.unlinkSync(path.join(BACKUP_DIR, f));
+      }
+    }
+
+    res.json({
+      ok: true,
+      backup_file: `pdw-backup-${TIMESTAMP}.db`,
+      total_backups: Math.min(files.length + 1, MAX_BACKUPS),
+    });
+  } catch (err) {
+    logError('backup', err);
+    res.status(500).json({ error: 'Backup failed: ' + err.message });
+  }
+});
+
+// ─── Admin: List backups ───
+
+router.get('/api/admin/backups', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const BACKUP_DIR = process.env.BACKUP_DIR || '/data/backups';
+    const fs = require('fs');
+    if (!fs.existsSync(BACKUP_DIR)) return res.json({ backups: [] });
+
+    const files = fs.readdirSync(BACKUP_DIR)
+      .filter(f => f.startsWith('pdw-backup-') && f.endsWith('.db'))
+      .map(f => {
+        const stat = fs.statSync(path.join(BACKUP_DIR, f));
+        return { filename: f, size: stat.size, created_at: stat.mtime.toISOString() };
+      })
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
+
+    res.json({ backups: files });
+  } catch (err) {
+    logError('backups.list', err);
+    res.status(500).json({ error: 'Failed to list backups: ' + err.message });
+  }
+});
+
+// ─── Admin: Delete a backup ───
+
+router.delete('/api/admin/backups/:filename', requireAuth, requireAdmin, (req, res) => {
+  try {
+    const BACKUP_DIR = process.env.BACKUP_DIR || '/data/backups';
+    const fs = require('fs');
+    const filename = req.params.filename;
+    if (!filename.startsWith('pdw-backup-') || !filename.endsWith('.db')) {
+      return res.status(400).json({ error: 'Invalid backup filename' });
+    }
+    const filePath = path.join(BACKUP_DIR, filename);
+    if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Backup not found' });
+    fs.unlinkSync(filePath);
+    res.json({ ok: true });
+  } catch (err) {
+    logError('backup.delete', err);
+    res.status(500).json({ error: 'Failed to delete backup: ' + err.message });
+  }
+});
+
+module.exports = { router, setBroadcast };

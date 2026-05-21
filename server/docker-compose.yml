@@ -1,0 +1,95 @@
+# ─── PDW Monitor Server ───
+# Main web app + API. Run with: docker compose up -d
+#
+# Network: br0.50 VLAN at 10.20.50.30
+# Companion services (client, rtlsdr) also on br0.50 — reach via IP.
+
+services:
+  pdw-monitor:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: pdw-monitor
+    restart: unless-stopped
+
+    ports:
+      - "${PDW_PORT:-3000}:3000"
+
+    volumes:
+      # Persistent storage for SQLite DB, VAPID keys, etc.
+      - pdw-data:/data
+
+    environment:
+      # ── Secrets (auto-generated on first run if not set) ──
+      - JWT_SECRET=${JWT_SECRET:-}
+      - API_KEY=${API_KEY:-}
+
+      # ── Auto admin setup (first run only) ──
+      # Default: admin / changeme
+      - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-changeme}
+
+      # ── Push notifications (auto-generated if not set) ──
+      - VAPID_PUBLIC_KEY=${VAPID_PUBLIC_KEY:-}
+      - VAPID_PRIVATE_KEY=${VAPID_PRIVATE_KEY:-}
+      - VAPID_EMAIL=${VAPID_EMAIL:-mailto:admin@example.com}
+
+      # ── Tuning ──
+      - DEDUP_WINDOW_MS=${DEDUP_WINDOW_MS:-30000}
+      - MULTIPART_TIMEOUT_MS=${MULTIPART_TIMEOUT_MS:-10000}
+      - NODE_ENV=production
+
+      # ── Message retention (days) ──
+      - MESSAGE_RETENTION_DAYS=${MESSAGE_RETENTION_DAYS:-180}
+
+      # ── Auto backup ──
+      - BACKUP_INTERVAL_HOURS=${BACKUP_INTERVAL_HOURS:-24}
+      - BACKUP_DIR=${BACKUP_DIR:-/data/backups}
+      - MAX_BACKUPS=${MAX_BACKUPS:-30}
+
+      # ── RTL-SDR audio stream URL (via br0.50 VLAN IP) ──
+      - RTL_STREAM_URL=${RTL_STREAM_URL:-http://10.20.50.32:8090}
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+    # ── Resource limits ──
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
+        reservations:
+          memory: 128M
+          cpus: "0.25"
+
+    # ── Security hardening ──
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=64M
+
+    stop_grace_period: 15s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    networks:
+      br0.50:
+        ipv4_address: 10.20.50.30
+
+volumes:
+  pdw-data:
+    driver: local
+
+networks:
+  br0.50:
+    external: true

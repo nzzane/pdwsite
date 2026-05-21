@@ -1,0 +1,69 @@
+# ─── RTL-SDR FireComm Audio Streaming ───
+# Tunes an RTL-SDR dongle to FireComm frequency, demodulates FM audio,
+# and streams MP3 to the PDW Monitor server for authenticated users.
+#
+# Prerequisites:
+#   - PDW Monitor server running on br0.50 (10.20.50.30)
+#   - RTL-SDR USB dongle connected (dedicated to FireComm)
+#   - Set RTL_STREAM_URL=http://10.20.50.32:8090 on the server
+#
+# Usage:
+#   docker compose up -d
+#
+# NOTE: If you also run the PDW client, you need TWO RTL-SDR dongles.
+
+services:
+  rtlsdr:
+    build:
+      context: .
+    container_name: pdw-rtlsdr
+    restart: unless-stopped
+
+    environment:
+      # NZ FireComm primary frequency (NFM)
+      - FREQ=${RTL_FIRE_FREQ:-75.5875M}
+      - MODE=${RTL_FIRE_MODE:-fm}
+      - GAIN=${RTL_FIRE_GAIN:-40}
+      - SQUELCH=${RTL_FIRE_SQUELCH:-0}
+      - SAMPLE_RATE=200000
+      - STREAM_PORT=8090
+
+    # ── USB device access for RTL-SDR dongle ──
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+
+    privileged: false
+    cap_add:
+      - DAC_OVERRIDE
+
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8090/status"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+
+    stop_grace_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+    networks:
+      br0.50:
+        ipv4_address: 10.20.50.32
+
+networks:
+  br0.50:
+    external: true

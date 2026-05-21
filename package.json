@@ -1,0 +1,22 @@
+{
+  "name": "pdw-monitor",
+  "version": "1.0.0",
+  "description": "PDW Pager Monitoring Web App - POCSAG/FLEX decoder with filtering, groups, and push notifications",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "client": "node client/pdw-client.js",
+    "setup": "node server/setup.js",
+    "generate-vapid": "node -e \"const wp=require('web-push');const k=wp.generateVAPIDKeys();console.log('VAPID_PUBLIC_KEY='+k.publicKey);console.log('VAPID_PRIVATE_KEY='+k.privateKey)\""
+  },
+  "dependencies": {
+    "bcrypt": "^5.1.1",
+    "better-sqlite3": "^11.7.0",
+    "cors": "^2.8.5",
+    "express": "^4.21.1",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^10.0.0",
+    "web-push": "^3.6.7",
+    "ws": "^8.18.0"
+  }
+}

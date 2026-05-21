@@ -1,0 +1,87 @@
+# ─── PDW Client (Pager Decoder) ───
+# Runs rtl_fm → multimon-ng → pdw-client.js to decode pager messages
+# and send them to the PDW Monitor server.
+#
+# Prerequisites:
+#   - PDW Monitor server running on br0.50 (10.20.50.30)
+#   - RTL-SDR USB dongle connected (tuned to pager frequency)
+#
+# Usage:
+#   docker compose up -d
+#
+# Get your API key:
+#   docker exec pdw-monitor cat /data/.api-key
+
+services:
+  pdw-client:
+    build:
+      context: .
+    container_name: pdw-client
+    restart: unless-stopped
+
+    environment:
+      # ── Server connection (via br0.50 VLAN) ──
+      - SERVER_URL=${CLIENT_SERVER_URL:-http://10.20.50.30:3000}
+      - API_KEY=${API_KEY:?Set API_KEY from: docker exec pdw-monitor cat /data/.api-key}
+
+      # ── RTL-SDR tuning ──
+      - RTL_FREQUENCY=${RTL_FREQUENCY:-157.925M}
+      - RTL_GAIN=${RTL_GAIN:-40}
+      - RTL_PPM=${RTL_PPM:-0}
+      - RTL_DEVICE=${RTL_DEVICE:-0}
+      - RTL_SAMPLE_RATE=${RTL_SAMPLE_RATE:-22050}
+      - RTL_SQUELCH=${RTL_SQUELCH:-0}
+
+      # ── Multimon-ng decoders ──
+      - DECODERS=${DECODERS:-POCSAG512,POCSAG1200,FLEX}
+
+      # ── Batching / dedup ──
+      - BATCH_SIZE=${BATCH_SIZE:-10}
+      - BATCH_INTERVAL_MS=${BATCH_INTERVAL_MS:-2000}
+      - DEDUP_WINDOW_S=${DEDUP_WINDOW_S:-30}
+      - MULTIPART_TIMEOUT_MS=${CLIENT_MULTIPART_TIMEOUT_MS:-10000}
+
+      # ── Capcodes to ignore (comma-separated) ──
+      - EXCLUDE_CAPCODES=${EXCLUDE_CAPCODES:-}
+
+      # ── FLEX fragment join (ms) — joins split multimon-ng output lines ──
+      - FLEX_JOIN_MS=${FLEX_JOIN_MS:-2000}
+
+      # ── Silence alert (minutes) — warns if no pages received ──
+      - SILENCE_ALERT_MIN=${SILENCE_ALERT_MIN:-0}
+
+      # ── Debug mode ──
+      - DEBUG=${DEBUG:-0}
+
+    # ── USB device access for RTL-SDR dongle ──
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
+
+    privileged: false
+    cap_add:
+      - DAC_OVERRIDE
+
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "1.0"
+        reservations:
+          memory: 64M
+          cpus: "0.25"
+
+    stop_grace_period: 10s
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+    networks:
+      br0.50:
+        ipv4_address: 10.20.50.31
+
+networks:
+  br0.50:
+    external: true

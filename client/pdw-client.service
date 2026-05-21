@@ -1,0 +1,59 @@
+[Unit]
+Description=PDW Client - RTL-SDR Pager Decoder
+Documentation=https://github.com/pdw-monitor
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/dev/bus/usb
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+Restart=always
+RestartSec=10
+
+# Environment - adjust these to match your setup
+Environment=SERVER_URL=http://10.20.50.30:3000
+Environment=API_KEY=YOUR_API_KEY_HERE
+Environment=RTL_FREQUENCY=157.950M
+Environment=RTL_GAIN=32
+Environment=RTL_PPM=0
+Environment=RTL_DEVICE=0
+Environment=RTL_SAMPLE_RATE=22050
+Environment=RTL_SQUELCH=0
+Environment=DECODERS=POCSAG512,POCSAG1200,FLEX
+Environment=BATCH_SIZE=10
+Environment=BATCH_INTERVAL_MS=2000
+Environment=DEDUP_WINDOW_S=30
+Environment=EXCLUDE_CAPCODES=
+Environment=MAX_RETRIES=5
+Environment=RETRY_BASE_MS=2000
+Environment=MAX_QUEUE_SIZE=1000
+Environment=PIPELINE_RESTART_DELAY_MS=5000
+Environment=DEBUG=0
+
+# Working directory
+WorkingDirectory=/home/turt/pdwsite/client
+
+# Run the client launcher
+ExecStart=/home/turt/pdwsite/client/start-client.sh
+ExecReload=/bin/kill -HUP $MAINPID
+
+# Resource limits
+MemoryMax=512M
+CPUQuota=100%
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/tmp
+PrivateTmp=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=pdw-client
+
+[Install]
+WantedBy=multi-user.target

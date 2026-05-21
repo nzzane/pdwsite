@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="PDW Monitor">
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" href="/icons/icon-192.png">
+  <title>PDW Monitor</title>
+  <link rel="stylesheet" href="/css/app.css">
+</head>
+<body>
+  <!-- Login screen -->
+  <div id="login-screen" class="screen active">
+    <div class="login-container">
+      <div class="login-logo">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M12 2L2 7l10 5 10-5-10-5z"/>
+          <path d="M2 17l10 5 10-5"/>
+          <path d="M2 12l10 5 10-5"/>
+        </svg>
+        <h1>PDW Monitor</h1>
+        <p>Pager Monitoring System</p>
+      </div>
+      <form id="login-form" autocomplete="on">
+        <div class="form-group">
+          <label for="login-username">Username</label>
+          <input type="text" id="login-username" name="username" autocomplete="username" required>
+        </div>
+        <div class="form-group">
+          <label for="login-password">Password</label>
+          <input type="password" id="login-password" name="password" autocomplete="current-password" required>
+        </div>
+        <button type="submit" class="btn btn-primary btn-full">Sign In</button>
+        <div id="login-error" class="error-msg hidden"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="app-screen" class="screen">
+    <!-- Top bar -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <button id="nav-toggle" class="btn-icon" aria-label="Menu">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+          </svg>
+        </button>
+        <h1 class="topbar-title">PDW Monitor</h1>
+      </div>
+      <div class="topbar-right">
+        <button id="btn-home" class="btn-icon" aria-label="Home" title="Home - Live Feed">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        </button>
+        <button id="btn-search-toggle" class="btn-icon mobile-only" aria-label="Search" title="Search">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>
+          </svg>
+        </button>
+        <div id="connection-status" class="status-dot disconnected" title="Disconnected"></div>
+        <button id="btn-notifications" class="btn-icon" aria-label="Notifications" title="Enable notifications">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+            <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+            <line class="bell-slash" x1="1" y1="1" x2="23" y2="23" stroke-width="2.5"/>
+          </svg>
+        </button>
+        <button id="btn-user-menu" class="btn-icon" aria-label="User menu">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+            <circle cx="12" cy="7" r="4"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- User dropdown menu -->
+    <div id="user-menu" class="dropdown-menu hidden">
+      <div id="user-info" class="dropdown-header"></div>
+      <a href="#" id="menu-change-pw">Change Password</a>
+      <a href="#" id="menu-admin" class="admin-only hidden">Admin Panel</a>
+      <a href="#" id="menu-logout">Sign Out</a>
+    </div>
+
+    <!-- Sidebar / navigation -->
+    <nav id="sidebar" class="sidebar">
+      <div class="sidebar-section">
+        <h3>Views</h3>
+        <a href="#" class="nav-item active" data-view="live">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/></svg>
+          Live Feed
+        </a>
+        <a href="#" class="nav-item" data-view="search">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Search
+        </a>
+        <a href="#" class="nav-item" data-view="stats">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+          Stats
+        </a>
+        <a href="#" class="nav-item" data-view="notifications">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          Settings
+        </a>
+      </div>
+      <div class="sidebar-section">
+        <h3>Favourites</h3>
+        <div id="sidebar-favourites" class="nav-list"></div>
+      </div>
+      <div class="sidebar-section">
+        <h3>Groups</h3>
+        <div id="sidebar-groups" class="nav-list"></div>
+      </div>
+      <div class="sidebar-section">
+        <h3>Keyword Alerts</h3>
+        <div id="sidebar-keywords" class="nav-list"></div>
+        <button id="btn-add-keyword" class="btn btn-sm btn-secondary" style="margin-top:0.375rem;width:100%">+ Add Alert</button>
+      </div>
+      <div class="sidebar-section">
+        <h3>Alarm Level Alerts</h3>
+        <p style="font-size:0.75rem;color:var(--text-muted);margin:0 0.625rem 0.375rem">Get alerted on multi-alarm fires</p>
+        <div style="padding:0 0.625rem">
+          <select id="alarm-level-select" class="filter-select" style="width:100%">
+            <option value="">Off</option>
+            <option value="2">2nd Alarm and above</option>
+            <option value="3">3rd Alarm and above</option>
+            <option value="4">4th Alarm and above</option>
+            <option value="5">5th Alarm only</option>
+          </select>
+        </div>
+      </div>
+      <div class="sidebar-section">
+        <h3>Saved Filters</h3>
+        <div id="sidebar-filters" class="nav-list"></div>
+      </div>
+    </nav>
+
+    <!-- Sidebar overlay for mobile -->
+    <div id="sidebar-overlay" class="sidebar-overlay"></div>
+
+    <!-- Main content area -->
+    <main class="main-content">
+      <!-- Search bar (mobile toggle) -->
+      <div id="search-bar" class="search-bar hidden-mobile">
+        <input type="text" id="filter-search" placeholder="Search messages..." class="filter-input">
+      </div>
+
+      <!-- Filter bar -->
+      <div id="filter-bar" class="filter-bar">
+        <div class="filter-row">
+          <select id="filter-call-type" class="filter-select">
+            <option value="">All Types</option>
+          </select>
+          <select id="filter-protocol" class="filter-select">
+            <option value="">All Protocols</option>
+            <option value="FLEX">FLEX (Fire)</option>
+            <option value="POCSAG">POCSAG (Ambo)</option>
+          </select>
+          <select id="filter-region" class="filter-select">
+            <option value="">All Regions</option>
+          </select>
+          <input type="text" id="filter-capcode" placeholder="Capcode" class="filter-input filter-sm">
+          <input type="text" id="filter-location" placeholder="Location" class="filter-input filter-sm">
+          <input type="text" id="filter-trucks" placeholder="Trucks" class="filter-input filter-sm">
+          <select id="filter-group" class="filter-select">
+            <option value="">All Groups</option>
+          </select>
+          <input type="date" id="filter-date-from" class="filter-input filter-sm" title="From date">
+          <input type="date" id="filter-date-to" class="filter-input filter-sm" title="To date">
+          <button id="btn-clear-filters" class="btn-clear-filters" aria-label="Clear filters" title="Clear all filters">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            <span>Clear</span>
+          </button>
+          <button id="btn-save-filter" class="btn-filter-icon" aria-label="Save filter" title="Save filter">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21l-7-5-7 5V5a2 2 0 012-2h10a2 2 0 012 2z"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Live feed view -->
+      <div id="view-live" class="view active">
+        <div id="pull-to-refresh" class="pull-to-refresh">
+          <svg class="ptr-spinner" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 11-6.219-8.56"/></svg>
+          <span class="ptr-text">Pull to refresh</span>
+        </div>
+        <div class="view-header">
+          <h2>Live Feed</h2>
+          <div class="view-actions">
+            <label class="toggle-label" title="Hide test and status/timing messages">
+              <input type="checkbox" id="filter-hide-test" checked>
+              Hide misc
+            </label>
+            <label class="toggle-label">
+              <input type="checkbox" id="toggle-autoscroll" checked>
+              Auto-scroll
+            </label>
+            <button id="btn-pause" class="btn btn-sm">Pause</button>
+          </div>
+        </div>
+        <div id="message-list" class="message-list"></div>
+        <div id="live-pagination" class="pagination"></div>
+      </div>
+
+      <!-- Search view -->
+      <div id="view-search" class="view">
+        <div class="view-header">
+          <h2>Search Messages</h2>
+        </div>
+        <div id="search-results" class="message-list"></div>
+        <div id="search-pagination" class="pagination"></div>
+      </div>
+
+      <!-- Stats view -->
+      <div id="view-stats" class="view">
+        <div class="view-header">
+          <h2>Statistics (24h)</h2>
+          <button id="btn-refresh-stats" class="btn btn-sm">Refresh</button>
+        </div>
+        <div id="stats-content" class="stats-grid"></div>
+      </div>
+
+      <!-- Settings view -->
+      <div id="view-notifications" class="view">
+        <div class="view-header">
+          <h2>Settings</h2>
+        </div>
+        <div id="notifications-content" class="notifications-content"></div>
+      </div>
+
+      <!-- Admin view -->
+      <div id="view-admin" class="view">
+        <div class="view-header">
+          <h2>Admin Panel</h2>
+        </div>
+        <div class="admin-tabs">
+          <button class="admin-tab active" data-tab="groups">Groups</button>
+          <button class="admin-tab" data-tab="aliases">Capcode Aliases</button>
+          <button class="admin-tab" data-tab="import">Import</button>
+          <button class="admin-tab" data-tab="users">Users</button>
+          <button class="admin-tab" data-tab="settings">Settings</button>
+          <button class="admin-tab" data-tab="backups">Backups</button>
+          <button class="admin-tab" data-tab="logs">Logs</button>
+        </div>
+        <div id="admin-content" class="admin-content"></div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Audio player bar (shown only when RTL-SDR stream is available) -->
+  <div id="audio-player" class="audio-player hidden" role="region" aria-label="FireComm Audio">
+    <div class="audio-player-inner">
+      <div class="audio-info">
+        <span id="audio-status-dot" class="audio-dot audio-dot-off" title="Stream status"></span>
+        <span id="audio-freq-label" class="audio-freq">FireComm</span>
+        <div class="audio-level" id="audio-level" title="Signal level">
+          <div id="audio-level-fill" class="audio-level-fill"></div>
+        </div>
+        <span id="audio-sq-label" class="audio-sq-label hidden">SQ</span>
+      </div>
+      <div class="audio-controls">
+        <button id="btn-audio-play" class="btn-icon audio-btn" aria-label="Play stream" title="Play FireComm audio">
+          <!-- Play icon -->
+          <svg id="audio-icon-play" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="none"><polygon points="5,3 19,12 5,21"/></svg>
+          <!-- Stop icon (hidden by default) -->
+          <svg id="audio-icon-stop" class="hidden" width="20" height="20" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="4" y="4" width="16" height="16" rx="2"/></svg>
+        </button>
+        <input id="audio-volume" type="range" min="0" max="1" step="0.05" value="0.8" class="audio-volume" aria-label="Volume">
+        <button id="btn-audio-mute" class="btn-icon audio-btn" aria-label="Mute" title="Mute">
+          <svg id="audio-icon-vol" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><path d="M19.07 4.93a10 10 0 010 14.14"/><path d="M15.54 8.46a5 5 0 010 7.07"/></svg>
+          <svg id="audio-icon-mute" class="hidden" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="11,5 6,9 2,9 2,15 6,15 11,19"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+        </button>
+      </div>
+      <div class="audio-actions">
+        <span id="audio-listener-count" class="audio-listeners hidden"></span>
+        <button id="btn-audio-settings" class="btn-icon audio-btn admin-only hidden" aria-label="Audio settings" title="RTL-SDR Settings">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 012.83-2.83l.06.06A1.65 1.65 0 009 4.68a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Modal overlay -->
+  <div id="modal-overlay" class="modal-overlay hidden">
+    <div id="modal" class="modal">
+      <div class="modal-header">
+        <h3 id="modal-title"></h3>
+        <button id="modal-close" class="btn-icon">&times;</button>
+      </div>
+      <div id="modal-body" class="modal-body"></div>
+      <div id="modal-footer" class="modal-footer"></div>
+    </div>
+  </div>
+
+  <!-- Detail panel backdrop -->
+  <div id="detail-backdrop" class="detail-backdrop"></div>
+
+  <!-- Message detail panel (slide-up on mobile) -->
+  <div id="detail-panel" class="detail-panel hidden">
+    <div class="detail-header">
+      <h3>Message Detail</h3>
+      <button id="detail-close" class="btn-icon">&times;</button>
+    </div>
+    <div id="detail-content" class="detail-content"></div>
+  </div>
+
+  <script src="/js/app.js"></script>
+</body>
+</html>

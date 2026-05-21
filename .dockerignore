@@ -1,0 +1,17 @@
+node_modules
+npm-debug.log*
+data/
+*.db
+*.db-wal
+*.db-shm
+.git
+.gitignore
+.env
+.env.example
+README.md
+LICENSE
+client/
+rtlsdr/
+docker-compose*.yml
+Dockerfile
+.dockerignore
