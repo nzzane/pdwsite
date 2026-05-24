@@ -76,11 +76,13 @@ db.exec(`
   -- Groups (regions / categories)
   CREATE TABLE IF NOT EXISTS groups_ (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT UNIQUE NOT NULL,
+    name TEXT NOT NULL,
     description TEXT DEFAULT '',
     colour TEXT DEFAULT '#3b82f6',
     created_by INTEGER REFERENCES users(id),
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    user_id INTEGER DEFAULT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE(name, user_id)
   );
 
   -- Group members (capcodes belonging to a group)
@@ -274,6 +276,13 @@ try {
 // Add default_region column to user_preferences
 try {
   db.exec("ALTER TABLE user_preferences ADD COLUMN default_region TEXT DEFAULT NULL");
+} catch (e) {
+  // Column already exists, ignore
+}
+
+// Add user_id column to groups_ for user-private groups (NULL = global/admin)
+try {
+  db.exec("ALTER TABLE groups_ ADD COLUMN user_id INTEGER DEFAULT NULL REFERENCES users(id) ON DELETE CASCADE");
 } catch (e) {
   // Column already exists, ignore
 }

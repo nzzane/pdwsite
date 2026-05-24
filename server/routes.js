@@ -12,6 +12,37 @@ const { NZ_REGIONS, STREET_SUFFIXES, contentMatchesRegion } = require('./regions
 
 const router = express.Router();
 
+// ─── Simple in-memory rate limiter for auth endpoints ───
+// Keyed by IP; resets after windowMs. No external dependency required.
+const loginAttempts = new Map();
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000; // 15 min
+const RATE_LIMIT_MAX = 20; // max attempts per window
+
+function loginRateLimit(req, res, next) {
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const now = Date.now();
+  let entry = loginAttempts.get(ip);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + RATE_LIMIT_WINDOW_MS };
+    loginAttempts.set(ip, entry);
+  }
+  entry.count++;
+  if (entry.count > RATE_LIMIT_MAX) {
+    const retryAfter = Math.ceil((entry.resetAt - now) / 1000);
+    res.set('Retry-After', String(retryAfter));
+    return res.status(429).json({ error: 'Too many login attempts. Try again later.' });
+  }
+  next();
+}
+
+// Prune stale rate limit entries every 30 minutes to avoid memory growth
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginAttempts) {
+    if (now > entry.resetAt) loginAttempts.delete(ip);
+  }
+}, 30 * 60 * 1000);
+
 // ─── Broadcast helper (set by server on startup) ───
 let broadcast = () => {};
 function setBroadcast(fn) {
@@ -40,7 +71,7 @@ router.get('/api/health', (req, res) => {
 
 // ─── Auth routes ───
 
-router.post('/api/auth/login', async (req, res) => {
+router.post('/api/auth/login', loginRateLimit, async (req, res) => {
   try {
     const { username, password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
@@ -56,6 +87,7 @@ router.post('/api/auth/register', requireAuth, requireAdmin, async (req, res) =>
   try {
     const { username, password, role, must_change_password } = req.body;
     if (!username || !password) return res.status(400).json({ error: 'Username and password required' });
+    if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
     if (role && role !== 'user' && role !== 'admin') return res.status(400).json({ error: 'Invalid role' });
     const result = await register(username, password, role || 'user', !!must_change_password);
     res.json(result);
@@ -77,6 +109,7 @@ router.post('/api/auth/change-password', requireAuth, async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
     if (!currentPassword || !newPassword) return res.status(400).json({ error: 'Both passwords required' });
+    if (newPassword.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters' });
     const bcrypt = require('bcrypt');
     const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
     const valid = await bcrypt.compare(currentPassword, user.password_hash);
@@ -1573,6 +1606,7 @@ router.post('/api/admin/groups/capcodes/import', requireAuth, requireAdmin, (req
 
   const insert = db.prepare('INSERT OR IGNORE INTO group_members (group_id, capcode) VALUES (?, ?)');
   let inserted = 0;
+  let skipped = 0;
   for (const cc of capcodeList) {
     try {
       insert.run(groupId, cc);
@@ -1580,7 +1614,7 @@ router.post('/api/admin/groups/capcodes/import', requireAuth, requireAdmin, (req
     } catch { skipped++; }
   }
 
-  res.json({ inserted, total: capcodeList.length });
+  res.json({ inserted, skipped, total: capcodeList.length });
 });
 
 // ─── Admin: Create a group with capcodes from CSV ───
@@ -1653,7 +1687,7 @@ router.post('/api/admin/groups/create-with-capcodes', requireAuth, requireAdmin,
 
 // ─── Admin: Trigger database backup ───
 
-router.post('/api/admin/backup', requireAuth, requireAdmin, (req, res) => {
+router.post('/api/admin/backup', requireAuth, requireAdmin, async (req, res) => {
   try {
     const BACKUP_DIR = process.env.BACKUP_DIR || '/data/backups';
     const fs = require('fs');
@@ -1671,13 +1705,8 @@ router.post('/api/admin/backup', requireAuth, requireAdmin, (req, res) => {
     fs.writeFileSync(testFile, 'test');
     fs.unlinkSync(testFile);
 
-    // better-sqlite3 backup requires a Database object as destination
-    const backupDb = new Database(BACKUP_FILE);
-    try {
-      db.backup(backupDb);
-    } finally {
-      backupDb.close();
-    }
+    // better-sqlite3 backup: await the Promise so backup is complete before responding
+    await db.backup(BACKUP_FILE);
 
     // Remove old backups beyond MAX_BACKUPS
     const files = fs.readdirSync(BACKUP_DIR)

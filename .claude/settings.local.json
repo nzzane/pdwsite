@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"require\\('./server/routes.js'\\); console.log\\('routes.js OK'\\)\")",
+      "Bash(node -e \"require\\('./server/index.js'\\)\")",
+      "Bash(node --check server/routes.js)",
+      "Bash(node --check server/index.js)",
+      "Bash(node --check public/js/app.js)"
+    ]
+  }
+}

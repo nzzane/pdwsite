@@ -2336,10 +2336,14 @@
     `);
     $('#modal-cancel').onclick = hideModal;
     $('#modal-save').onclick = async () => {
+      const curPw = $('#cur-password').value;
+      const newPw = $('#new-pw').value;
+      if (!curPw || !newPw) return toast('Both passwords required', 'error');
+      if (newPw.length < 8) return toast('Password must be at least 8 characters', 'error');
       try {
         await api('/api/auth/change-password', {
           method: 'POST',
-          body: JSON.stringify({ currentPassword: $('#cur-password').value, newPassword: $('#new-pw').value })
+          body: JSON.stringify({ currentPassword: curPw, newPassword: newPw })
         });
         hideModal();
         toast('Password changed', 'success');
@@ -2369,7 +2373,7 @@
       const confirmPw = $('#force-confirm-pw').value;
       if (!curPw || !newPw) return toast('All fields required', 'error');
       if (newPw !== confirmPw) return toast('New passwords do not match', 'error');
-      if (newPw.length < 4) return toast('Password must be at least 4 characters', 'error');
+      if (newPw.length < 8) return toast('Password must be at least 8 characters', 'error');
       try {
         await api('/api/auth/change-password', {
           method: 'POST',

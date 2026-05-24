@@ -210,7 +210,7 @@ const BACKUP_INTERVAL_HOURS = parseInt(process.env.BACKUP_INTERVAL_HOURS || '24'
 const BACKUP_DIR = process.env.BACKUP_DIR || '/data/backups';
 const MAX_BACKUPS = parseInt(process.env.MAX_BACKUPS || '30', 10);
 
-function autoBackup() {
+async function autoBackup() {
   try {
     const fs = require('fs');
     const path = require('path');
@@ -229,15 +229,9 @@ function autoBackup() {
     const TIMESTAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const BACKUP_FILE = path.join(BACKUP_DIR, `pdw-backup-${TIMESTAMP}.db`);
 
-    // better-sqlite3 backup requires a Database object as destination
-    const Database = require('better-sqlite3');
-    const backupDb = new Database(BACKUP_FILE);
-    try {
-      db.backup(backupDb);
-      console.log(`[backup] Created: pdw-backup-${TIMESTAMP}.db`);
-    } finally {
-      backupDb.close();
-    }
+    // better-sqlite3 backup: await the Promise so backup is fully complete before pruning
+    await db.backup(BACKUP_FILE);
+    console.log(`[backup] Created: pdw-backup-${TIMESTAMP}.db`);
 
     // Prune old backups beyond MAX_BACKUPS
     const files = fs.readdirSync(BACKUP_DIR)
@@ -250,7 +244,7 @@ function autoBackup() {
       }
       console.log(`[backup] Pruned old backups, keeping last ${MAX_BACKUPS}`);
     }
-    console.log(`[backup] Total backups: ${files.length}`);
+    console.log(`[backup] Total backups: ${Math.min(files.length, MAX_BACKUPS)}`);
   } catch (err) {
     console.error(`[backup] Auto-backup failed: ${err.message}`);
     console.error(`[backup] BACKUP_DIR=${BACKUP_DIR}, exists=${require('fs').existsSync(BACKUP_DIR)}`);
