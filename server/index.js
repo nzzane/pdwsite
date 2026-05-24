@@ -221,11 +221,6 @@ async function autoBackup() {
       console.log(`[backup] Created backup directory: ${BACKUP_DIR}`);
     }
 
-    // Verify directory is writable
-    const testFile = path.join(BACKUP_DIR, '.write-test');
-    fs.writeFileSync(testFile, 'test');
-    fs.unlinkSync(testFile);
-
     const TIMESTAMP = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     const BACKUP_FILE = path.join(BACKUP_DIR, `pdw-backup-${TIMESTAMP}.db`);
 

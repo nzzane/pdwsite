@@ -814,8 +814,14 @@ router.post('/api/push/test', requireAuth, (req, res) => {
       .then(() => { sent++; })
       .catch((err) => {
         failed++;
-        errors.push(err.statusCode || err.message);
-        if (err.statusCode === 410 || err.statusCode === 404) {
+        const status = err.statusCode;
+        const detail = status
+          ? `HTTP ${status}${err.body ? ': ' + String(err.body).substring(0, 120) : ''}`
+          : (err.message || 'Unknown error');
+        errors.push(detail);
+        logWarn('push.test.fail', detail, { endpoint: sub.endpoint });
+        // Remove stale/invalid subscriptions (all 4xx except 429 rate-limit)
+        if (status && status !== 429 && status >= 400) {
           db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
         }
       });
@@ -1480,13 +1486,17 @@ function sendToSubscriptions(subs, payload) {
         keys: JSON.parse(sub.keys_json),
       };
       webpush.sendNotification(subscription, payload).catch((err) => {
-        if (err.statusCode === 410 || err.statusCode === 404) {
+        // 410 Gone / 404 Not Found: subscription no longer valid
+        // 401 Unauthorized: VAPID key mismatch (e.g. after container rebuild with new keys)
+        // All 4xx except 429 (rate limit) = stale/invalid subscription, remove it
+        const status = err.statusCode;
+        if (status === 410 || status === 404 || status === 401 || (status >= 400 && status !== 429)) {
           db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
+          logWarn('push.stale', `Removed stale subscription (HTTP ${status})`, { endpoint: sub.endpoint });
         }
       });
     } catch (err) {
       logError('push.sendToSubscriptions', err, { endpoint: sub.endpoint });
-      // Remove broken subscription
       db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
     }
   }
@@ -1695,15 +1705,10 @@ router.post('/api/admin/backup', requireAuth, requireAdmin, async (req, res) => 
     const BACKUP_FILE = path.join(BACKUP_DIR, `pdw-backup-${TIMESTAMP}.db`);
     const MAX_BACKUPS = parseInt(process.env.MAX_BACKUPS || '30', 10);
 
-    // Ensure backup directory exists and is writable
+    // Ensure backup directory exists (entrypoint pre-creates it; this is a fallback)
     if (!fs.existsSync(BACKUP_DIR)) {
       fs.mkdirSync(BACKUP_DIR, { recursive: true, mode: 0o755 });
     }
-
-    // Verify writable
-    const testFile = path.join(BACKUP_DIR, '.write-test');
-    fs.writeFileSync(testFile, 'test');
-    fs.unlinkSync(testFile);
 
     // better-sqlite3 backup: await the Promise so backup is complete before responding
     await db.backup(BACKUP_FILE);

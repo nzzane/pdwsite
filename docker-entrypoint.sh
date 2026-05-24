@@ -98,5 +98,8 @@ if [ -z "$VAPID_PUBLIC_KEY" ] || [ -z "$VAPID_PRIVATE_KEY" ]; then
   fi
 fi
 
+# ── Ensure backup directory exists and is owned by the pdw user ──
+mkdir -p "${BACKUP_DIR:-/data/backups}"
+
 echo "Starting server..."
 exec node server/index.js
