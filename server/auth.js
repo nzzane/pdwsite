@@ -84,4 +84,15 @@ async function register(username, password, role = 'user', mustChangePassword = 
   return { user: { id: result.lastInsertRowid, username, role } };
 }
 
-module.exports = { requireAuth, requireAdmin, requireApiKey, login, register };
+/**
+ * Issue a fresh JWT for a known user object (used by refresh endpoint).
+ */
+function generateToken(user) {
+  return jwt.sign(
+    { id: user.id, username: user.username, role: user.role },
+    config.JWT_SECRET,
+    { expiresIn: config.JWT_EXPIRY }
+  );
+}
+
+module.exports = { requireAuth, requireAdmin, requireApiKey, login, register, generateToken };

@@ -2,7 +2,7 @@ const express = require('express');
 const http = require('http');
 const path = require('path');
 const Database = require('better-sqlite3');
-const { requireAuth, requireAdmin, requireApiKey, login, register } = require('./auth');
+const { requireAuth, requireAdmin, requireApiKey, login, register, generateToken } = require('./auth');
 const db = require('./db');
 const config = require('./config');
 const parser = require('./parser');
@@ -103,6 +103,12 @@ router.get('/api/auth/me', requireAuth, (req, res) => {
   const user = db.prepare('SELECT id, username, role, must_change_password FROM users WHERE id = ?').get(req.user.id);
   if (!user) return res.status(401).json({ error: 'User not found' });
   res.json({ ...user, must_change_password: !!user.must_change_password });
+});
+
+router.post('/api/auth/refresh', requireAuth, (req, res) => {
+  const user = db.prepare('SELECT id, username, role FROM users WHERE id = ?').get(req.user.id);
+  if (!user) return res.status(401).json({ error: 'User not found' });
+  res.json({ token: generateToken(user) });
 });
 
 router.post('/api/auth/change-password', requireAuth, async (req, res) => {
@@ -817,7 +823,7 @@ router.post('/api/push/test', requireAuth, (req, res) => {
         const status = err.statusCode;
         const detail = status
           ? `HTTP ${status}${err.body ? ': ' + String(err.body).substring(0, 120) : ''}`
-          : (err.message || 'Unknown error');
+          : (err.message || err.code || String(err) || 'Unknown error');
         errors.push(detail);
         logWarn('push.test.fail', detail, { endpoint: sub.endpoint });
         // Remove stale/invalid subscriptions (all 4xx except 429 rate-limit)
@@ -1490,9 +1496,12 @@ function sendToSubscriptions(subs, payload) {
         // 401 Unauthorized: VAPID key mismatch (e.g. after container rebuild with new keys)
         // All 4xx except 429 (rate limit) = stale/invalid subscription, remove it
         const status = err.statusCode;
-        if (status === 410 || status === 404 || status === 401 || (status >= 400 && status !== 429)) {
+        if (status && status !== 429 && status >= 400) {
           db.prepare('DELETE FROM push_subscriptions WHERE endpoint = ?').run(sub.endpoint);
           logWarn('push.stale', `Removed stale subscription (HTTP ${status})`, { endpoint: sub.endpoint });
+        } else if (!status) {
+          // Network/connection error — log for diagnostics but keep subscription
+          logWarn('push.network', err.message || err.code || String(err), { endpoint: sub.endpoint });
         }
       });
     } catch (err) {

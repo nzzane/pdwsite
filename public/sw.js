@@ -1,4 +1,4 @@
-const CACHE_NAME = 'pdw-v20';
+const CACHE_NAME = 'pdw-v21';
 const STATIC_ASSETS = [
   '/manifest.json',
   '/icons/icon-192.png',
@@ -90,6 +90,60 @@ self.addEventListener('push', (event) => {
     );
   }
 });
+
+// Push token rotation — Apple Push / FCM periodically rotate subscription endpoints.
+// Without this handler the old endpoint silently expires and notifications stop after days.
+self.addEventListener('pushsubscriptionchange', (event) => {
+  event.waitUntil(
+    (async () => {
+      const options = event.oldSubscription ? event.oldSubscription.options : {};
+      let newSub;
+      try {
+        newSub = await self.registration.pushManager.subscribe(options);
+      } catch {
+        return; // Permission revoked or other unrecoverable error
+      }
+
+      // Try authenticated POST using JWT stored in IDB by the app
+      const token = await getTokenFromIDB();
+      if (token) {
+        try {
+          const resp = await fetch('/api/push/subscribe', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+            body: JSON.stringify({ subscription: newSub.toJSON() }),
+          });
+          if (resp.ok) return;
+        } catch { /* network error, fall through */ }
+      }
+
+      // Fallback: postMessage to any open window so it can use its own token
+      const clientList = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' });
+      for (const client of clientList) {
+        client.postMessage({ type: 'push_resubscribe', subscription: newSub.toJSON() });
+        break;
+      }
+    })()
+  );
+});
+
+function getTokenFromIDB() {
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open('pdw-auth', 1);
+      req.onupgradeneeded = (e) => e.target.result.createObjectStore('tokens');
+      req.onsuccess = (e) => {
+        try {
+          const tx = e.target.result.transaction('tokens', 'readonly');
+          const get = tx.objectStore('tokens').get('jwt');
+          get.onsuccess = () => resolve(get.result || null);
+          get.onerror = () => resolve(null);
+        } catch { resolve(null); }
+      };
+      req.onerror = () => resolve(null);
+    } catch { resolve(null); }
+  });
+}
 
 // Notification click handler
 self.addEventListener('notificationclick', (event) => {

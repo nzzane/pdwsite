@@ -129,6 +129,38 @@
     return data;
   }
 
+  // ─── IDB token sync for SW (pushsubscriptionchange needs JWT) ───
+  function storeTokenForSW(token) {
+    try {
+      const req = indexedDB.open('pdw-auth', 1);
+      req.onupgradeneeded = (e) => e.target.result.createObjectStore('tokens');
+      req.onsuccess = (e) => {
+        try {
+          const tx = e.target.result.transaction('tokens', 'readwrite');
+          if (token) { tx.objectStore('tokens').put(token, 'jwt'); }
+          else { tx.objectStore('tokens').delete('jwt'); }
+        } catch {}
+      };
+    } catch {}
+  }
+
+  // ─── Silent JWT refresh (called on app open; refreshes if <14d left) ───
+  async function silentTokenRefresh() {
+    try {
+      if (!state.token) return;
+      const parts = state.token.split('.');
+      if (parts.length !== 3) return;
+      const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (!payload.exp) return;
+      const msLeft = payload.exp * 1000 - Date.now();
+      if (msLeft > 14 * 24 * 60 * 60 * 1000) return;
+      const data = await api('/api/auth/refresh', { method: 'POST' });
+      state.token = data.token;
+      localStorage.setItem('pdw_token', data.token);
+      storeTokenForSW(data.token);
+    } catch { /* keep existing token */ }
+  }
+
   // ─── Toast notifications ───
   function toast(msg, type = 'info') {
     let container = $('.toast-container');
@@ -2576,6 +2608,14 @@
         return;
       }
 
+      // Clear any stale browser-side subscription before subscribing fresh.
+      // Required when VAPID keys changed (container rebuild) — browser holds an old Apple/FCM token
+      // that conflicts with the new key, causing "Registration failed - push service error".
+      const existingSub = await reg.pushManager.getSubscription();
+      if (existingSub) {
+        await existingSub.unsubscribe();
+      }
+
       const sub = await reg.pushManager.subscribe({
         userVisibleOnly: true,
         applicationServerKey: urlBase64ToUint8Array(publicKey),
@@ -2585,7 +2625,13 @@
       updateNotificationBell();
     } catch (err) {
       console.error('Push setup failed:', err);
-      toast('Push setup failed: ' + err.message + '. In-app alerts with sound still work.', 'error');
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+      const msg = err.message || '';
+      if (isIOS && (msg.includes('Registration failed') || msg.includes('push service'))) {
+        toast('Push failed. On iOS, open the app from your Home Screen icon (not Safari). Tap Share → "Add to Home Screen" first.', 'error');
+      } else {
+        toast('Push setup failed: ' + (msg || 'unknown error') + '. In-app alerts with sound still work.', 'error');
+      }
     }
   }
 
@@ -2655,6 +2701,7 @@
       state.token = data.token;
       state.user = data.user;
       localStorage.setItem('pdw_token', data.token);
+      storeTokenForSW(data.token);
       showApp();
     } catch (err) {
       const errEl = $('#login-error');
@@ -2667,6 +2714,7 @@
     state.token = null;
     state.user = null;
     localStorage.removeItem('pdw_token');
+    storeTokenForSW(null);
     disconnectWs();
     // Clear intervals to prevent memory leaks
     if (state.timeAgoInterval) {
@@ -2729,6 +2777,7 @@
     // Auto-subscribe to push if permission already granted (ensures background notifications work)
     autoSubscribePush();
     updateNotificationBell();
+    silentTokenRefresh();
 
     // Initialise audio player if RTL-SDR stream is configured
     initAudioPlayer();
@@ -3083,6 +3132,15 @@
       const { publicKey } = await api('/api/push/vapid-key');
       if (!publicKey) return;
       let sub = existing;
+      // Detect VAPID key mismatch (e.g. after container rebuild) and force re-subscribe
+      if (existing && existing.options?.applicationServerKey) {
+        const oldKey = new Uint8Array(existing.options.applicationServerKey);
+        const newKey = urlBase64ToUint8Array(publicKey);
+        if (oldKey.length !== newKey.length || oldKey.some((b, i) => b !== newKey[i])) {
+          await existing.unsubscribe();
+          sub = null;
+        }
+      }
       if (!sub) {
         sub = await reg.pushManager.subscribe({
           userVisibleOnly: true,
@@ -3436,6 +3494,10 @@
         if (event.data && event.data.type === 'navigate_to_message' && event.data.messageId) {
           navigateToMessage(event.data.messageId);
         }
+        if (event.data && event.data.type === 'push_resubscribe' && event.data.subscription) {
+          api('/api/push/subscribe', { method: 'POST', body: JSON.stringify({ subscription: event.data.subscription }) })
+            .catch(() => {});
+        }
       });
     }
 
@@ -3455,6 +3517,7 @@
     });
 
     if (state.token) {
+      storeTokenForSW(state.token);
       showApp();
     } else {
       $('#login-screen').classList.add('active');
